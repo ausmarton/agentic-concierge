@@ -11,7 +11,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
-## [0.3.11] — 2026-03-04
+## [0.3.12] — 2026-03-04
 
 ### Fixed
 
@@ -414,6 +414,7 @@ Initial public release of agentic-concierge, covering Phases 1–8.
 - Dockerfile (multi-stage builder + slim runtime) and docker-compose.yml (Ollama + agentic-concierge + model-pull).
 
 [Unreleased]: https://github.com/ausmarton/agentic-concierge/compare/v0.3.10...HEAD
+[0.3.12]: https://github.com/ausmarton/agentic-concierge/compare/v0.3.11...v0.3.12
 [0.3.11]: https://github.com/ausmarton/agentic-concierge/compare/v0.3.10...v0.3.11
 [0.3.10]: https://github.com/ausmarton/agentic-concierge/compare/v0.3.9...v0.3.10
 [0.3.9]: https://github.com/ausmarton/agentic-concierge/compare/v0.3.8...v0.3.9
