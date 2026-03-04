@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from agentic_concierge.config.features import (
+    BACKEND_PRIORITY,
     Feature,
     FeatureDisabledError,
     FeatureSet,
@@ -62,8 +63,8 @@ def test_large_features():
 def test_server_features():
     fs = PROFILE_FEATURES[ProfileTier.SERVER]
     assert Feature.TELEMETRY in fs
-    # Server drops Ollama — vLLM handles all throughput
-    assert Feature.OLLAMA not in fs
+    # Server includes Ollama as fallback (adaptive backend resolution)
+    assert Feature.OLLAMA in fs
     assert Feature.VLLM in fs
 
 
@@ -154,3 +155,19 @@ def test_browser_in_medium_features():
 def test_browser_in_large_and_server_features():
     assert Feature.BROWSER in PROFILE_FEATURES[ProfileTier.LARGE]
     assert Feature.BROWSER in PROFILE_FEATURES[ProfileTier.SERVER]
+
+
+# ---------------------------------------------------------------------------
+# Adaptive backend resolution: BACKEND_PRIORITY and SERVER profile
+# ---------------------------------------------------------------------------
+
+def test_server_profile_includes_ollama():
+    """Ollama is enabled in SERVER profile for fallback."""
+    assert Feature.OLLAMA in PROFILE_FEATURES[ProfileTier.SERVER]
+
+
+def test_backend_priority_all_tiers():
+    """BACKEND_PRIORITY has entries for every ProfileTier."""
+    for tier in ProfileTier:
+        assert tier in BACKEND_PRIORITY, f"Missing BACKEND_PRIORITY for {tier.value}"
+        assert len(BACKEND_PRIORITY[tier]) >= 2, f"BACKEND_PRIORITY[{tier.value}] too short"

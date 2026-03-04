@@ -235,6 +235,7 @@ mod tests {
             venv_dir: data_dir.join("venv"),
             uv_path: data_dir.join("uv"),
             version_file: data_dir.join("installed_version"),
+            extras_file: data_dir.join("installed_extras"),
             bin_dir: data_dir.join("bin"),
             installed_bin: data_dir.join("bin").join("concierge"),
             skip_update: false,

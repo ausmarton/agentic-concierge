@@ -47,3 +47,24 @@ SHELL_DEFAULT_TIMEOUT_S: int = 120
 # a slow link.  600 s (10 min) is a reasonable upper bound; if pulls routinely
 # exceed this, increase it or pull the model manually before running fabric.
 LLM_PULL_TIMEOUT_S: int = 600
+
+# ---------------------------------------------------------------------------
+# Backend defaults
+# ---------------------------------------------------------------------------
+
+# Default base URLs for local LLM backends (OpenAI-compatible endpoints).
+DEFAULT_BACKEND_URLS: dict[str, str] = {
+    "ollama": "http://localhost:11434/v1",
+    "vllm": "http://localhost:8000/v1",
+}
+
+# ---------------------------------------------------------------------------
+# Nano / in-process model
+# ---------------------------------------------------------------------------
+
+# Default GGUF model for the inprocess backend (mistral.rs).
+NANO_GGUF_FILENAME: str = "qwen2.5-3b-instruct-q4_k_m.gguf"
+NANO_GGUF_URL: str = (
+    "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/"
+    "qwen2.5-3b-instruct-q4_k_m.gguf"
+)

@@ -165,6 +165,8 @@ def run(
         rprint(f"[red]{e}[/red]")
         sys.exit(1)
 
+    for w in resolved.warnings:
+        rprint(f"[yellow]Warning: {w}[/yellow]")
     rprint(f"[dim]Using model: {resolved.model} at {resolved.base_url}[/dim]")
 
     chat_client = build_chat_client(resolved.model_config)
@@ -415,6 +417,11 @@ def doctor(
     extras_table.add_column("Status")
     extras_table.add_column("Install hint", overflow="fold")
 
+    # Detect launcher venv pip for install hints
+    from pathlib import Path as _Path
+    _launcher_pip = _Path.home() / ".local/share/agentic-concierge/venv/bin/pip"
+    _pip_cmd = str(_launcher_pip) if _launcher_pip.exists() else "pip"
+
     # Browser (Playwright)
     if _ilu.find_spec("playwright") is not None:
         try:
@@ -426,7 +433,7 @@ def doctor(
         browser_hint = "—"
     else:
         browser_status = "[dim]✗ not installed[/dim]"
-        browser_hint = "pip install agentic-concierge[browser]"
+        browser_hint = f"{_pip_cmd} install 'agentic-concierge[browser]'"
     extras_table.add_row("browser", browser_status, browser_hint)
 
     # ChromaDB
@@ -440,7 +447,7 @@ def doctor(
         chroma_hint = "—"
     else:
         chroma_status = "[dim]✗ not installed[/dim]"
-        chroma_hint = "pip install agentic-concierge[embed]"
+        chroma_hint = f"{_pip_cmd} install 'agentic-concierge[embed]'"
     extras_table.add_row("chromadb", chroma_status, chroma_hint)
 
     console.print(extras_table)
@@ -468,6 +475,9 @@ def plan_cmd(
     except RuntimeError as e:
         rprint(f"[red]{e}[/red]")
         sys.exit(1)
+
+    for w in resolved.warnings:
+        rprint(f"[yellow]Warning: {w}[/yellow]")
 
     chat_client = build_chat_client(resolved.model_config)
     routing_cfg = config.models.get(config.routing_model_key) or resolved.model_config
@@ -548,6 +558,9 @@ def resume_cmd(
     except RuntimeError as e:
         rprint(f"[red]{e}[/red]")
         sys.exit(1)
+
+    for w in resolved.warnings:
+        rprint(f"[yellow]Warning: {w}[/yellow]")
 
     chat_client = build_chat_client(resolved.model_config)
     run_repository = FileSystemRunRepository(workspace_root=workspace)

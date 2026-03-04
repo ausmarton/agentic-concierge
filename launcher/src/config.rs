@@ -7,6 +7,7 @@ pub struct LauncherConfig {
     pub venv_dir: PathBuf, // data_dir/venv
     pub uv_path: PathBuf,  // data_dir/uv
     pub version_file: PathBuf, // data_dir/installed_version
+    pub extras_file: PathBuf, // data_dir/installed_extras
     /// The directory containing the installed launcher binary (e.g. `~/.local/bin`).
     /// Stored for Phase 14+ use; not yet read by any hot path.
     #[allow(dead_code)]
@@ -35,6 +36,7 @@ pub fn launcher_config() -> Result<LauncherConfig, ConfigError> {
     let venv_dir = data_dir.join("venv");
     let uv_path = data_dir.join("uv");
     let version_file = data_dir.join("installed_version");
+    let extras_file = data_dir.join("installed_extras");
 
     let bin_dir = dirs::executable_dir()
         .or_else(|| dirs::home_dir().map(|h| h.join(".local").join("bin")))
@@ -53,6 +55,7 @@ pub fn launcher_config() -> Result<LauncherConfig, ConfigError> {
         venv_dir,
         uv_path,
         version_file,
+        extras_file,
         bin_dir,
         installed_bin,
         skip_update,

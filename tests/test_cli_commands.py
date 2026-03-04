@@ -24,12 +24,15 @@ runner = CliRunner()
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _mock_resolved():
+def _mock_resolved(warnings=None):
     """Minimal stand-in for ResolvedModel."""
     m = MagicMock()
     m.model = "llama3.1:8b"
     m.base_url = "http://localhost:11434"
     m.model_config = MagicMock()
+    m.warnings = warnings or []
+    m.fallback_used = bool(warnings)
+    m.resolved_backend = "ollama"
     return m
 
 
@@ -118,6 +121,25 @@ def test_run_shows_model_info():
         result = runner.invoke(app, ["run", "write hello world"])
     assert result.exit_code == 0
     assert "llama3.1:8b" in result.output
+
+
+def test_run_shows_fallback_warnings():
+    """When resolve_llm returns warnings, they must appear in CLI output."""
+    mock_result = _mock_run_result()
+    resolved = _mock_resolved(warnings=["Fallback: primary vLLM unreachable, using Ollama"])
+    with (
+        patch("agentic_concierge.interfaces.cli.resolve_llm", return_value=resolved),
+        patch("agentic_concierge.interfaces.cli.build_chat_client", return_value=MagicMock()),
+        patch(
+            "agentic_concierge.interfaces.cli.execute_task",
+            new_callable=AsyncMock,
+            return_value=mock_result,
+        ),
+    ):
+        result = runner.invoke(app, ["run", "write hello"])
+    assert result.exit_code == 0
+    assert "Warning" in result.output
+    assert "Fallback" in result.output
 
 
 # ---------------------------------------------------------------------------

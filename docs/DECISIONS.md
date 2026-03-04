@@ -371,7 +371,9 @@ Profile -> feature defaults:
 | small   | yes | yes | — | yes | yes | — | — | — | — |
 | medium  | yes | yes | yes | yes | yes | — | yes | — | — |
 | large   | yes | yes | yes | yes | yes | — | yes | yes | — |
-| server  | yes | — | yes | yes | yes | — | yes | yes | yes |
+| server  | yes | yes* | yes | yes | yes | — | yes | yes | yes |
+
+*\* Added in ADR-018: Ollama enabled on server as fallback backend (was previously excluded).*
 
 Individual features can be overridden in `config.yaml` `features:` block regardless of profile.
 
@@ -565,3 +567,71 @@ partial-download files are cleaned up; the installed binary is unchanged.
   truncated sig, and apply-update blocked on bad sig.
 - The signing step in `release.yml` is graceful: if `LAUNCHER_SIGNING_KEY_PEM` is unset
   (e.g. a fork or early release), binaries are published unsigned with a CI warning.
+
+---
+
+## ADR-018: Adaptive backend resolution — fallback chain in `resolve_llm()`
+
+**Status:** Accepted
+**Date:** 2026-03-04
+
+**Context:** The system picks a single backend from config, probes it, and hard-fails
+if it is unavailable. A SERVER-profile machine with 94 GB RAM but no vLLM running gets
+`RuntimeError` and exits — even if Ollama is installed and could serve the request.
+The profile system disabled backends (SERVER excluded Ollama) rather than expressing
+preference order. The system should always be able to run *something*.
+
+**Decision:** Refactor `resolve_llm()` to try backends in priority order, with the
+configured primary backend tried first (preserving backward compatibility). On failure,
+iterate through `BACKEND_PRIORITY[tier]` — a per-profile ordered list of backend names
+— filtered by enabled features, skipping the already-tried primary.
+
+The priority order per profile tier:
+- NANO: `["inprocess", "ollama", "cloud"]`
+- SMALL: `["ollama", "inprocess", "cloud"]`
+- MEDIUM: `["ollama", "vllm", "inprocess", "cloud"]`
+- LARGE: `["vllm", "ollama", "inprocess", "cloud"]`
+- SERVER: `["vllm", "ollama", "inprocess", "cloud"]`
+
+Each backend is probed with a dedicated `_try_<backend>()` helper:
+- `_try_ollama()`: discovers models; if unreachable and `shutil.which("ollama")` finds
+  the binary, auto-starts via `ensure_llm_available()` with a 30 s timeout.
+- `_try_vllm()`: probes the OpenAI-compatible `/v1/models` endpoint.
+- `_try_inprocess()`: checks `is_available()` from the mistral.rs module and looks for
+  a GGUF model file at the platformdirs data path.
+- `_try_cloud()`: scans `config.models` for a `backend="generic"` entry with a non-empty
+  `api_key`.
+
+**Changes to ResolvedLLM:**
+- `warnings: list[str]` — human-readable warnings (e.g. "Primary backend failed; using
+  fallback: ollama"). Displayed in CLI and included in HTTP API `_meta`.
+- `fallback_used: bool` — `True` when resolution used a non-primary backend.
+- `resolved_backend: str` — the backend name that was actually used.
+
+All fields have defaults, so existing callers are unaffected.
+
+**Changes to SERVER profile:** `Feature.OLLAMA` added to
+`PROFILE_FEATURES[ProfileTier.SERVER]` so Ollama is eligible as a fallback. Users can
+still force-disable it with `features.ollama: false`. This supersedes the comment in
+ADR-013's table that said "server drops Ollama".
+
+**Alternatives considered:**
+- Moving the fallback logic to `execute_task` or a new orchestration layer: rejected
+  because `resolve_llm()` already encapsulates all discovery logic and its return type
+  (`ResolvedLLM`) flows directly into `build_chat_client()`. Keeping the change inside
+  `resolve_llm()` means zero changes to callers, `execute_task`, `ChatClient` protocol,
+  or specialist packs.
+- A separate `BackendResolver` class: unnecessary abstraction at this stage. The
+  `_try_backend()` dispatch function and per-backend helpers are sufficient.
+
+**Consequences:**
+- The system no longer hard-fails when the configured backend is down — it degrades
+  gracefully through the fallback chain.
+- Warnings are surfaced to the user (CLI terminal, HTTP `_meta`) so they know a fallback
+  is in use and can fix the primary backend.
+- `BACKEND_PRIORITY` is a new constant in `config/features.py` that must be maintained
+  alongside `PROFILE_FEATURES` when new profiles or backends are added.
+- Bootstrap (`first_run.py`) gains `_ensure_nano_model()` for GGUF auto-download, making
+  the inprocess backend viable as a fallback without manual model download.
+- 11 new tests cover fallback scenarios, feature gating, auto-start, comprehensive error
+  messages, and `_try_backend` unit tests.

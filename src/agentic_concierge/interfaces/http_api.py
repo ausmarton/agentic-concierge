@@ -199,6 +199,9 @@ async def run(req: RunRequest):
         "model": result.model_name,
         "run_id": result.run_id.value,
         "required_capabilities": result.required_capabilities,
+        "warnings": resolved.warnings,
+        "fallback_used": resolved.fallback_used,
+        "resolved_backend": resolved.resolved_backend,
     }
     return out
 

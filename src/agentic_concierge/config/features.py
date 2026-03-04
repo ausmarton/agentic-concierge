@@ -81,6 +81,7 @@ PROFILE_FEATURES: dict[ProfileTier, frozenset[Feature]] = {
     }),
     ProfileTier.SERVER: frozenset({
         Feature.INPROCESS,
+        Feature.OLLAMA,
         Feature.VLLM,
         Feature.CLOUD,
         Feature.MCP,
@@ -89,6 +90,16 @@ PROFILE_FEATURES: dict[ProfileTier, frozenset[Feature]] = {
         Feature.TELEMETRY,
         Feature.BROWSER,
     }),
+}
+
+# Backend resolution priority per profile tier.
+# resolve_llm() tries backends in this order when the configured primary fails.
+BACKEND_PRIORITY: dict[ProfileTier, list[str]] = {
+    ProfileTier.NANO: ["inprocess", "ollama", "cloud"],
+    ProfileTier.SMALL: ["ollama", "inprocess", "cloud"],
+    ProfileTier.MEDIUM: ["ollama", "vllm", "inprocess", "cloud"],
+    ProfileTier.LARGE: ["vllm", "ollama", "inprocess", "cloud"],
+    ProfileTier.SERVER: ["vllm", "ollama", "inprocess", "cloud"],
 }
 
 

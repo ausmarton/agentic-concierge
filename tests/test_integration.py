@@ -176,6 +176,41 @@ def test_api_run_accepts_prompt():
     assert task.specialist_id == "engineering"
 
 
+def test_api_run_meta_includes_fallback_fields():
+    """API POST /run _meta must include warnings, fallback_used, resolved_backend."""
+    from unittest.mock import MagicMock
+    from agentic_concierge.interfaces.http_api import app
+    cfg = ConciergeConfig(
+        models=DEFAULT_CONFIG.models,
+        specialists=DEFAULT_CONFIG.specialists,
+        local_llm_ensure_available=False,
+    )
+    mock_model_cfg = next(iter(cfg.models.values()))
+    mock_resolved = MagicMock(
+        model_config=mock_model_cfg,
+        base_url=mock_model_cfg.base_url,
+        warnings=["Fallback: primary unreachable, using Ollama"],
+        fallback_used=True,
+        resolved_backend="ollama",
+    )
+    with patch("agentic_concierge.interfaces.http_api.load_config", return_value=cfg), \
+         patch("agentic_concierge.interfaces.http_api.resolve_llm", return_value=mock_resolved), \
+         patch("agentic_concierge.interfaces.http_api.execute_task", new_callable=AsyncMock) as mock_run:
+        mock_run.return_value = RunResult(
+            run_id=RunId("test"), run_dir="/tmp/x", workspace_path="/tmp/x/w",
+            specialist_id="engineering", model_name="qwen2.5:7b",
+            payload={"action": "final", "summary": "Done", "artifacts": [], "next_steps": [], "notes": ""},
+        )
+        client = TestClient(app)
+        r = client.post("/run", json={"prompt": "hello", "pack": "engineering"})
+    assert r.status_code == 200
+    meta = r.json()["_meta"]
+    assert meta["fallback_used"] is True
+    assert meta["resolved_backend"] == "ollama"
+    assert len(meta["warnings"]) >= 1
+    assert "Fallback" in meta["warnings"][0]
+
+
 def _free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))

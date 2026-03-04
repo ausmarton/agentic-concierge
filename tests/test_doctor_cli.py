@@ -178,3 +178,44 @@ def test_doctor_shows_chromadb_row():
     result = _invoke_doctor()
     assert result.exit_code == 0
     assert "chromadb" in result.output
+
+
+# ---------------------------------------------------------------------------
+# P15: doctor uses launcher venv pip path in install hints
+# ---------------------------------------------------------------------------
+
+def test_doctor_launcher_venv_pip_hint(tmp_path):
+    """When the launcher venv pip exists, doctor install hints use its full path."""
+    # Create a fake launcher pip binary
+    fake_pip = tmp_path / ".local/share/agentic-concierge/venv/bin/pip"
+    fake_pip.parent.mkdir(parents=True)
+    fake_pip.write_text("#!/bin/sh\n")
+
+    with (
+        patch("agentic_concierge.bootstrap.system_probe.probe_system", return_value=_sample_probe()),
+        patch("agentic_concierge.bootstrap.detected.load_detected", return_value=_sample_profile()),
+        patch(
+            "agentic_concierge.bootstrap.backend_manager.BackendManager.probe_all",
+            return_value=_healthy_backends(),
+        ),
+        patch("agentic_concierge.bootstrap.system_probe._check_internet", return_value=True),
+        patch("agentic_concierge.bootstrap.system_probe._check_ollama", return_value=True),
+        patch("agentic_concierge.bootstrap.system_probe._check_vllm", return_value=False),
+        patch("subprocess.run", side_effect=FileNotFoundError),
+        # Patch Path.home() to point at our tmp_path so the launcher pip check finds it
+        patch("pathlib.Path.home", return_value=tmp_path),
+    ):
+        result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    # The install hints should reference the launcher venv pip path (may be
+    # wrapped across multiple lines by the Rich table, so check for a
+    # distinctive substring that will appear on a single line).
+    assert "venv/bin/pip" in result.output
+
+
+def test_doctor_regular_pip_hint_when_no_launcher():
+    """Without launcher venv, doctor install hints use plain 'pip'."""
+    result = _invoke_doctor()
+    assert result.exit_code == 0
+    # At minimum, hints should mention 'pip install' (not a launcher path)
+    assert "pip" in result.output

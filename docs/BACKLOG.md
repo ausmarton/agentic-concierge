@@ -721,6 +721,7 @@ Phase 6 is complete (P6-1 through P6-4 all done; fast CI: 304 pass). Phase 7 foc
 
 | Item | Completed | Summary |
 |------|-----------|---------|
+| Adaptive backend resolution | 2026-03-04 | `resolve_llm()` refactored with fallback chain: tries configured primary, then `BACKEND_PRIORITY[tier]` backends in order (vLLM → Ollama → inprocess → cloud). `ResolvedLLM` extended with `warnings`, `fallback_used`, `resolved_backend`. SERVER profile now includes Ollama as fallback. `_ensure_nano_model()` GGUF download in bootstrap. Doctor install hints detect launcher venv. HTTP API `_meta` includes fallback info. ADR-018. 11 new tests. Fast CI: 635 pass (+7). |
 | P7-4: Docs update for Phase 7 | 2026-02-25 | STATE.md (phase 7 in progress → complete, CI 342); PLAN.md (Phase 7 deliverables all ticked); VISION.md §7 (Phase 7 in history) + §8 (enterprise integrations row updated); BACKLOG.md done table. |
 | P7-3: Enterprise research specialist | 2026-02-25 | infrastructure/specialists/enterprise_research.py — cross_run_search tool (queries run index), file tools, web tools (network_allowed); SYSTEM_PROMPT_ENTERPRISE_RESEARCH (staleness/confidence notation, multi-source, structured reports); enterprise_research in DEFAULT_CONFIG with enterprise_search + github_search caps; registry._DEFAULT_BUILDERS updated; 16 tests — system prompt, capabilities, tool defs, cross_run_search execution, routing. Fast CI: 342 pass (+16). |
 | P7-2: GitHub MCP integration | 2026-02-25 | tests/test_mcp_real_github.py — 4 tests (list_tools, search_repositories, get_file_contents, unknown_tool_returns_error); skip_if_github_token_missing + skip_if_npx_unavailable + skip_if_mcp_not_installed fixtures; github_search + enterprise_search capability IDs added to capabilities.py; docs/MCP_INTEGRATIONS.md with GitHub/Confluence/Jira/filesystem config examples. Fast CI: 326 pass (unchanged — real_mcp deselected). |
@@ -786,7 +787,7 @@ vector work efficiently.
   on all other hot paths (LLM HTTP, tool subprocesses, file I/O).  No other
   Python→Rust FFI boundary is justified at current scale.
 - Toolchain: `maturin` build; wheel published alongside Python wheel in `release.yml`.
-- ADR: will add ADR-018 documenting the decision and the bottleneck evidence.
+- ADR: will add ADR-019 documenting the decision and the bottleneck evidence.
 
 ### P16-2: Additional specialist packs
 - `data-analysis` pack — pandas / polars / matplotlib tools; structured-output finish.

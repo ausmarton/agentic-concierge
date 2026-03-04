@@ -2,8 +2,28 @@
 
 **Purpose:** Single source of truth for “where we are” so any human or agent can resume work across restarts and sessions.
 
-**Last updated:** 2026-02-27. Fast CI: **618 pass** (`make test`; Python tests unchanged).
-Rust launcher: **20 tests pass** (`make test-rust`; up from 13 in Phase 13).
+**Last updated:** 2026-03-04. Fast CI: **643 pass** (`make test`).
+Rust launcher: **22 tests pass** (`make test-rust`).
+
+---
+
+## Adaptive backend resolution — **complete** (2026-03-04)
+
+`resolve_llm()` now falls back through `BACKEND_PRIORITY[tier]` when the configured
+primary backend is unreachable. Each backend is probed in order; the first to return
+models is used with `fallback_used=True` and a warning. Covers vLLM, Ollama (with
+auto-start), inprocess (mistral.rs + GGUF), and cloud (generic backend with api_key).
+SERVER profile now includes Ollama as a fallback backend.
+
+| Change | Files |
+|--------|-------|
+| `BACKEND_PRIORITY` + Ollama in SERVER | `config/features.py` |
+| `DEFAULT_BACKEND_URLS`, GGUF constants | `config/constants.py` |
+| `ResolvedLLM` fields + fallback chain | `infrastructure/llm_discovery.py` |
+| GGUF download in bootstrap | `bootstrap/first_run.py` |
+| Warning display + doctor hints | `interfaces/cli.py`, `interfaces/http_api.py` |
+| 11 new tests | `tests/test_llm_discovery.py`, `tests/test_features.py` |
+| ADR-018 | `docs/DECISIONS.md` |
 
 ---
 

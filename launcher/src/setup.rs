@@ -18,11 +18,13 @@ pub enum SetupError {
 /// Ensure managed venv exists with agentic-concierge installed.
 /// Returns path to the venv's concierge binary.
 ///
-/// Fast path: if `venv_dir/bin/concierge` already exists, return immediately.
+/// Fast path: if `venv_dir/bin/concierge` already exists, install any
+/// new extras requested via `CONCIERGE_EXTRA` and return.
 /// First-time path: detect system Python >= 3.10 or download uv, create venv, pip install.
 pub fn ensure_environment(config: &LauncherConfig) -> anyhow::Result<PathBuf> {
     let concierge_bin = config.venv_dir.join("bin").join("concierge");
     if concierge_bin.exists() {
+        ensure_extras(config)?;
         return Ok(concierge_bin);
     }
 
@@ -85,13 +87,62 @@ pub fn ensure_environment(config: &LauncherConfig) -> anyhow::Result<PathBuf> {
     // Write version file
     std::fs::write(&config.version_file, env!("CARGO_PKG_VERSION"))?;
 
+    // Write extras marker so ensure_extras can detect changes later.
+    let extras_val = config.pypi_extra.as_deref().unwrap_or("");
+    std::fs::write(&config.extras_file, extras_val)?;
+
     Ok(concierge_bin)
 }
 
+/// Install extras into an existing venv when `CONCIERGE_EXTRA` changes.
+///
+/// Compares the current `CONCIERGE_EXTRA` value against the marker file
+/// `data_dir/installed_extras`. If they differ, runs `pip install` with the
+/// new extras spec and updates the marker. Skipped when `CONCIERGE_EXTRA`
+/// is unset (no extras requested).
+fn ensure_extras(config: &LauncherConfig) -> anyhow::Result<()> {
+    let requested = match &config.pypi_extra {
+        Some(extra) if !extra.is_empty() => extra.as_str(),
+        _ => return Ok(()), // no extras requested — nothing to do
+    };
+
+    // Read what was previously installed.
+    let installed = std::fs::read_to_string(&config.extras_file).unwrap_or_default();
+    if installed.trim() == requested {
+        return Ok(()); // already up-to-date
+    }
+
+    eprintln!("[concierge] installing extras: {}", requested);
+    let pip = config.venv_dir.join("bin").join("pip");
+    let package_spec = format!("{}[{}]", config.package_name, requested);
+    let output = std::process::Command::new(&pip)
+        .args(["install", "--upgrade", &package_spec])
+        .output()
+        .map_err(|e| SetupError::PackageInstall {
+            code: -1,
+            stderr: e.to_string(),
+        })?;
+    if !output.status.success() {
+        let code = output.status.code().unwrap_or(-1);
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(SetupError::PackageInstall { code, stderr }.into());
+    }
+
+    // Update marker so we don't re-install next time.
+    std::fs::write(&config.extras_file, requested)?;
+    Ok(())
+}
+
 /// Upgrade the installed package to a specific version (called after self-update).
+///
+/// Includes extras from `CONCIERGE_EXTRA` so that `--self-update` preserves
+/// previously requested optional dependencies (mcp, otel, browser, embed, all).
 pub fn upgrade_package(config: &LauncherConfig, version: &str) -> anyhow::Result<()> {
     let pip = config.venv_dir.join("bin").join("pip");
-    let package_spec = format!("{}=={}", config.package_name, version);
+    let package_spec = match &config.pypi_extra {
+        Some(extra) => format!("{}[{}]=={}", config.package_name, extra, version),
+        None => format!("{}=={}", config.package_name, version),
+    };
     let output = std::process::Command::new(&pip)
         .args(["install", "--upgrade", &package_spec])
         .output()
@@ -105,6 +156,11 @@ pub fn upgrade_package(config: &LauncherConfig, version: &str) -> anyhow::Result
         return Err(SetupError::PackageInstall { code, stderr }.into());
     }
     std::fs::write(&config.version_file, version)?;
+
+    // Update extras marker so ensure_extras stays in sync after upgrade.
+    let extras_val = config.pypi_extra.as_deref().unwrap_or("");
+    std::fs::write(&config.extras_file, extras_val)?;
+
     Ok(())
 }
 
@@ -246,6 +302,7 @@ mod tests {
             venv_dir: data_dir.join("venv"),
             uv_path: data_dir.join("uv"),
             version_file: data_dir.join("installed_version"),
+            extras_file: data_dir.join("installed_extras"),
             bin_dir: data_dir.join("bin"),
             installed_bin: data_dir.join("bin").join("concierge"),
             skip_update: false,
@@ -280,6 +337,29 @@ mod tests {
         std::fs::write(&bin, "#!/bin/sh\necho fake").unwrap();
         let result = ensure_environment(&config).unwrap();
         assert_eq!(result, bin);
+    }
+
+    // ── ensure_extras tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn ensure_extras_noop_when_no_extra_requested() {
+        let dir = tempdir().unwrap();
+        let config = make_config(dir.path());
+        // pypi_extra is None → should return Ok immediately
+        let result = ensure_extras(&config);
+        assert!(result.is_ok());
+        assert!(!config.extras_file.exists());
+    }
+
+    #[test]
+    fn ensure_extras_noop_when_already_installed() {
+        let dir = tempdir().unwrap();
+        let mut config = make_config(dir.path());
+        config.pypi_extra = Some("mcp,otel".to_string());
+        std::fs::write(&config.extras_file, "mcp,otel").unwrap();
+        // Same extras already recorded → should return Ok without running pip
+        let result = ensure_extras(&config);
+        assert!(result.is_ok());
     }
 
     // ── extract_uv tests ──────────────────────────────────────────────────────

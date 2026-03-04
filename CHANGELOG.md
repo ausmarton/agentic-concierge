@@ -11,6 +11,58 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.3.10] — 2026-03-04
+
+### Added
+
+- **Adaptive backend resolution:** `resolve_llm()` now falls back through
+  `BACKEND_PRIORITY[tier]` when the configured primary backend is unreachable.
+  Each backend (vLLM, Ollama, inprocess, cloud) is probed in profile-dependent
+  priority order; the first to return models is used. Ollama is auto-started
+  during fallback if installed but not running. `ResolvedLLM` gains `warnings`,
+  `fallback_used`, and `resolved_backend` fields so callers know when a fallback
+  was used.
+- `config/features.py`: `BACKEND_PRIORITY` dict mapping each `ProfileTier` to
+  an ordered list of backend names.
+- `config/constants.py`: `DEFAULT_BACKEND_URLS` (Ollama/vLLM default endpoints),
+  `NANO_GGUF_FILENAME`, `NANO_GGUF_URL` for in-process model download.
+- `bootstrap/first_run.py`: `_ensure_nano_model()` downloads the GGUF model
+  file (streaming with progress) when the inprocess feature is enabled and
+  mistral.rs is installed.
+- `interfaces/cli.py`: `run`, `plan`, and `resume` commands now display
+  `resolved.warnings` in yellow when a fallback backend is used.
+- `interfaces/http_api.py`: `POST /run` response `_meta` now includes
+  `warnings`, `fallback_used`, and `resolved_backend` fields.
+- `interfaces/cli.py` (`doctor`): install hints now detect the launcher venv
+  pip path (`~/.local/share/agentic-concierge/venv/bin/pip`) and use it in
+  the hint instead of bare `pip`.
+- `docs/DECISIONS.md`: ADR-018 — Adaptive backend resolution design decision.
+
+### Changed
+
+- `config/features.py`: `PROFILE_FEATURES[ProfileTier.SERVER]` now includes
+  `Feature.OLLAMA` so Ollama is eligible as a fallback on server-profile
+  machines. Users can still force-disable with `features.ollama: false`.
+- `bootstrap/first_run.py`: `_ensure_nano_model()` now uses a Rich progress bar
+  (with download speed and ETA) instead of bare `print()` for GGUF download.
+
+### Tests
+
+- 13 new tests in `tests/test_llm_discovery.py`: fallback scenarios (vLLM→Ollama,
+  all→inprocess, all→cloud), feature gating, auto-start, comprehensive error
+  messages, `_try_backend` unit tests, cloud happy/no-key paths, primary success
+  sets `resolved_backend`.
+- 2 new tests in `tests/test_features.py`: SERVER profile includes Ollama,
+  `BACKEND_PRIORITY` has entries for all tiers.
+- 1 new test in `tests/test_cli_commands.py`: CLI displays fallback warnings.
+- 2 new tests in `tests/test_doctor_cli.py`: launcher venv pip hint detection,
+  plain pip fallback.
+- 1 new test in `tests/test_integration.py`: API `_meta` includes `warnings`,
+  `fallback_used`, `resolved_backend`.
+- Fast CI: **643 pass** (was 628, +15 net after updating 1 existing assertion).
+
+---
+
 ## [0.3.9] — 2026-02-27
 
 ### Fixed
@@ -334,7 +386,8 @@ Initial public release of agentic-concierge, covering Phases 1–8.
 - Release workflow: automated PyPI publish (OIDC trusted publishing) + Docker image to GHCR on version tags.
 - Dockerfile (multi-stage builder + slim runtime) and docker-compose.yml (Ollama + agentic-concierge + model-pull).
 
-[Unreleased]: https://github.com/ausmarton/agentic-concierge/compare/v0.3.9...HEAD
+[Unreleased]: https://github.com/ausmarton/agentic-concierge/compare/v0.3.10...HEAD
+[0.3.10]: https://github.com/ausmarton/agentic-concierge/compare/v0.3.9...v0.3.10
 [0.3.9]: https://github.com/ausmarton/agentic-concierge/compare/v0.3.8...v0.3.9
 [0.3.8]: https://github.com/ausmarton/agentic-concierge/compare/v0.3.7...v0.3.8
 [0.3.7]: https://github.com/ausmarton/agentic-concierge/compare/v0.3.6...v0.3.7
