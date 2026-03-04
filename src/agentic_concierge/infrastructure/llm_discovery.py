@@ -104,6 +104,22 @@ _EMBEDDING_ONLY_FAMILIES_OR_NAMES = frozenset(
     )
 )
 
+# Models that can chat but do NOT support OpenAI-style tool calling
+_TOOL_INCAPABLE_NAMES = frozenset(
+    s.lower()
+    for s in (
+        "sqlcoder",
+        "codellama",
+        "starcoder",
+        "starcoder2",
+        "deepseek-coder",
+        "stable-code",
+        "magicoder",
+        "phind-codellama",
+        "wizardcoder",
+    )
+)
+
 
 def _is_ollama_chat_capable(m: dict) -> bool:
     """True if this Ollama model is suitable for chat/completion (exclude embedding-only)."""
@@ -116,6 +132,18 @@ def _is_ollama_chat_capable(m: dict) -> bool:
             return False
     if "embed" in name and "chat" not in name and "instruct" not in name:
         return False
+    return True
+
+
+def _is_tool_capable(m: dict) -> bool:
+    """True if this Ollama model supports OpenAI-style tool calling."""
+    if not _is_ollama_chat_capable(m):
+        return False
+    name = (_ollama_model_name(m) or "").lower()
+    family = ((m.get("details") or {}).get("family") or "").lower()
+    for prefix in _TOOL_INCAPABLE_NAMES:
+        if name.startswith(prefix) or family.startswith(prefix):
+            return False
     return True
 
 
@@ -143,6 +171,13 @@ def _param_size_sort_key(name: str, details: dict | None) -> tuple:
     return (val, name)
 
 
+def _model_family(name: str) -> str:
+    """Extract family prefix from model name (e.g. 'qwen2.5:14b' → 'qwen2.5')."""
+    # Strip tag (everything after ':')
+    base = name.split(":")[0].lower()
+    return base
+
+
 def select_model(
     preferred_model: str,
     available: list[dict] | list[str],
@@ -150,25 +185,42 @@ def select_model(
     is_ollama: bool = True,
 ) -> str | None:
     """
-    Select best model from available list. If preferred_model is in the list, use it.
-    Otherwise pick the smallest available (by parameter size) so we avoid timeouts on huge models.
+    Select best model from available list.
+
+    Priority: exact match → same-family by closest size → any family by closest size.
+    Filters out models known not to support tool calling.
     Returns None if available is empty.
     """
     if not available:
         return None
     if is_ollama:
-        names = [m for m in (_ollama_model_name(m) for m in available) if m]
+        # Filter to tool-capable models only
+        tool_capable = [m for m in available if _is_tool_capable(m)]
+        names = [n for n in (_ollama_model_name(m) for m in tool_capable) if n]
         if preferred_model in names:
             return preferred_model
-        # Fallback: prefer smallest model >= preferred size; else largest < preferred size
-        name_to_entry = {_ollama_model_name(m): m for m in available}
+        # Build size index
+        name_to_entry = {_ollama_model_name(m): m for m in tool_capable}
         details_by_name = {n: (name_to_entry.get(n) or {}).get("details") for n in names}
         preferred_size = _param_size_sort_key(preferred_model, None)[0]
-        sized = [(n, _param_size_sort_key(n, details_by_name.get(n))[0]) for n in names]
-        larger = sorted([(n, s) for n, s in sized if s >= preferred_size], key=lambda t: t[1])
-        smaller = sorted([(n, s) for n, s in sized if s < preferred_size], key=lambda t: -t[1])
-        candidates = larger + smaller  # prefer larger first, then largest-of-smaller
-        return candidates[0][0] if candidates else None
+        preferred_family = _model_family(preferred_model)
+
+        def _size_candidates(model_names: list[str]) -> list[str]:
+            """Sort by: smallest >= preferred first, then largest < preferred."""
+            sized = [(n, _param_size_sort_key(n, details_by_name.get(n))[0]) for n in model_names]
+            larger = sorted([(n, s) for n, s in sized if s >= preferred_size], key=lambda t: t[1])
+            smaller = sorted([(n, s) for n, s in sized if s < preferred_size], key=lambda t: -t[1])
+            return [n for n, _ in larger + smaller]
+
+        # Prefer same-family models
+        same_family = [n for n in names if _model_family(n) == preferred_family]
+        if same_family:
+            candidates = _size_candidates(same_family)
+            if candidates:
+                return candidates[0]
+        # Fall back to any tool-capable model
+        candidates = _size_candidates(names)
+        return candidates[0] if candidates else None
     else:
         # OpenAI/vLLM: list of id strings
         ids = [s for s in available if isinstance(s, str) and s]

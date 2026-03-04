@@ -54,6 +54,27 @@ def test_select_model_prefers_smallest_larger():
     assert selected == "qwen2.5:32b"
 
 
+def test_select_model_excludes_tool_incapable():
+    """sqlcoder:15b is chat-capable but not tool-capable; must not be selected."""
+    models = [
+        {"name": "qwen2.5:32b", "model": "qwen2.5:32b", "details": {"family": "qwen2.5", "parameter_size": "32B"}},
+        {"name": "sqlcoder:15b", "model": "sqlcoder:15b", "details": {"family": "sqlcoder", "parameter_size": "15B"}},
+    ]
+    selected = select_model("qwen2.5:14b", models, is_ollama=True)
+    assert selected == "qwen2.5:32b"
+
+
+def test_select_model_prefers_same_family():
+    """Same-family models preferred over closer-sized models from other families."""
+    models = [
+        {"name": "qwen2.5:32b", "model": "qwen2.5:32b", "details": {"family": "qwen2.5", "parameter_size": "32B"}},
+        {"name": "llama3.1:8b", "model": "llama3.1:8b", "details": {"family": "llama", "parameter_size": "8B"}},
+    ]
+    # llama3.1:8b is closer in size to 14b, but qwen2.5:32b is same family
+    selected = select_model("qwen2.5:14b", models, is_ollama=True)
+    assert selected == "qwen2.5:32b"
+
+
 def test_select_model_falls_back_to_largest_smaller():
     """When no model >= preferred exists, select the largest smaller one."""
     models = [

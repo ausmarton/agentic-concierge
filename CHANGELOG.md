@@ -15,21 +15,26 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
-- **Model selection:** `select_model()` now picks the smallest model >= preferred
-  size instead of the absolute smallest. Falls back to largest model < preferred
-  when no larger model exists. Fixes selection of `qwen2.5:0.5b` (too small for
-  tool calling) when `qwen2.5:32b` was available. Also parses size from model
-  name (e.g. `qwen2.5:14b` → 14B) when `parameter_size` metadata is absent.
+- **Model selection:** `select_model()` now prefers same-family models and picks
+  the smallest model >= preferred size. Falls back to largest model < preferred
+  when no larger model exists. Parses size from model name (e.g. `qwen2.5:14b`
+  → 14B) when `parameter_size` metadata is absent.
+- **Tool-incapable model exclusion:** added `_TOOL_INCAPABLE_NAMES` blocklist
+  (`sqlcoder`, `codellama`, `starcoder`, etc.) — models that can chat but do not
+  support OpenAI-style tool calling are excluded from selection. Prevents
+  `sqlcoder:15b` being chosen over `qwen2.5:32b`.
 - **Playwright crash:** `BaseSpecialistPack.aopen()` now catches browser launch
   failures (e.g. browsers not installed) and logs a warning instead of crashing
   the entire task. The pack continues without browser tools.
 
 ### Tests
 
-- 3 new tests: `test_select_model_prefers_smallest_larger`,
+- 5 new tests: `test_select_model_prefers_smallest_larger`,
   `test_select_model_falls_back_to_largest_smaller`,
+  `test_select_model_excludes_tool_incapable`,
+  `test_select_model_prefers_same_family`,
   `test_aopen_failure_does_not_crash_pack`.
-- Fast CI: **646 pass** (was 643).
+- Fast CI: **648 pass** (was 643).
 
 ---
 
