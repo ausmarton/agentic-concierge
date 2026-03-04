@@ -876,3 +876,112 @@ async def test_synthesis_skipped_for_single_specialist(tmp_path):
     assert call_count["n"] == 2, (
         f"Expected 2 chat calls (no synthesis), got {call_count['n']}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Timeout recovery tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_timeout_recovery_uses_smaller_model(tmp_path):
+    """httpx.ReadTimeout on first chat call -> pack loop retries with smaller model."""
+    import httpx
+    from agentic_concierge.application.execute_task import _execute_pack_loop
+    from agentic_concierge.config.schema import ModelConfig
+
+    call_models = []
+
+    async def mock_chat(*, messages, model, tools, temperature=0.1, top_p=0.9, max_tokens=2048):
+        call_models.append(model)
+        if model == "qwen2.5:32b":
+            raise httpx.ReadTimeout("read timed out")
+        # Return a finish_task response for the smaller model
+        return _finish_response()
+
+    from unittest.mock import MagicMock
+    chat_client = MagicMock()
+    chat_client.chat = AsyncMock(side_effect=mock_chat)
+    # Ensure pop_events is not present so the drain-events block is skipped
+    del chat_client.pop_events
+
+    run_repository = FileSystemRunRepository(workspace_root=str(tmp_path))
+    run_id, run_dir, workspace_path = run_repository.create_run()
+
+    config = load_config()
+    pack = ConfigSpecialistRegistry(config).get_pack("engineering", workspace_path, False)
+
+    model_cfg = ModelConfig(
+        base_url="http://localhost:11434/v1",
+        model="qwen2.5:32b",
+        timeout_s=120.0,
+    )
+
+    messages = [
+        {"role": "system", "content": pack.system_prompt},
+        {"role": "user", "content": "Task:\ntest"},
+    ]
+
+    # build_chat_client returns a new client without pop_events
+    fallback_client = MagicMock()
+    fallback_client.chat = AsyncMock(side_effect=mock_chat)
+    del fallback_client.pop_events
+
+    with patch("agentic_concierge.infrastructure.chat.build_chat_client", return_value=fallback_client):
+        payload = await _execute_pack_loop(
+            pack=pack,
+            messages=messages,
+            model_cfg=model_cfg,
+            chat_client=chat_client,
+            run_repository=run_repository,
+            run_id=run_id,
+            max_steps=5,
+            available_models=["qwen2.5:8b", "qwen2.5:32b"],
+        )
+
+    # First call was to 32b (timed out), second to 8b (succeeded)
+    assert call_models[0] == "qwen2.5:32b"
+    assert call_models[1] == "qwen2.5:8b"
+    assert payload.get("action") == "final"
+
+
+@pytest.mark.asyncio
+async def test_timeout_no_smaller_model_raises(tmp_path):
+    """httpx.ReadTimeout with no smaller model available -> RuntimeError."""
+    import httpx
+    from agentic_concierge.application.execute_task import _execute_pack_loop
+    from agentic_concierge.config.schema import ModelConfig
+
+    async def mock_chat(*, messages, model, tools, temperature=0.1, top_p=0.9, max_tokens=2048):
+        raise httpx.ReadTimeout("read timed out")
+
+    chat_client = AsyncMock()
+    chat_client.chat = AsyncMock(side_effect=mock_chat)
+
+    run_repository = FileSystemRunRepository(workspace_root=str(tmp_path))
+    run_id, run_dir, workspace_path = run_repository.create_run()
+
+    config = load_config()
+    pack = ConfigSpecialistRegistry(config).get_pack("engineering", workspace_path, False)
+
+    model_cfg = ModelConfig(
+        base_url="http://localhost:11434/v1",
+        model="qwen2.5:3b",
+        timeout_s=120.0,
+    )
+
+    messages = [
+        {"role": "system", "content": pack.system_prompt},
+        {"role": "user", "content": "Task:\ntest"},
+    ]
+
+    with pytest.raises(RuntimeError, match="No smaller model available"):
+        await _execute_pack_loop(
+            pack=pack,
+            messages=messages,
+            model_cfg=model_cfg,
+            chat_client=chat_client,
+            run_repository=run_repository,
+            run_id=run_id,
+            max_steps=5,
+            available_models=["qwen2.5:3b"],
+        )

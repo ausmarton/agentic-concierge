@@ -109,7 +109,8 @@ def _result_summary(result) -> str:
 
 
 async def _run_with_streaming(
-    task, chat_client, run_repository, specialist_registry, config, resolved_model_cfg
+    task, chat_client, run_repository, specialist_registry, config, resolved_model_cfg,
+    resolved_llm=None,
 ):
     """Run execute_task with an event_queue and render events to the terminal in real-time."""
     from rich.console import Console
@@ -124,6 +125,7 @@ async def _run_with_streaming(
             specialist_registry=specialist_registry,
             config=config,
             resolved_model_cfg=resolved_model_cfg,
+            resolved_llm=resolved_llm,
             max_steps=40,
             event_queue=event_queue,
         )
@@ -179,7 +181,7 @@ def run(
             result = asyncio.run(
                 _run_with_streaming(
                     task, chat_client, run_repository, specialist_registry,
-                    config, resolved.model_config,
+                    config, resolved.model_config, resolved_llm=resolved,
                 )
             )
         else:
@@ -192,6 +194,7 @@ def run(
                     specialist_registry=specialist_registry,
                     config=config,
                     resolved_model_cfg=resolved.model_config,
+                    resolved_llm=resolved,
                     max_steps=40,
                 )
             )

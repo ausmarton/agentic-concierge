@@ -38,6 +38,7 @@ class ResolvedLLM:
     warnings: list[str] = field(default_factory=list)
     fallback_used: bool = False
     resolved_backend: str = ""  # "ollama", "vllm", "inprocess", "cloud"
+    available_models: list[str] = field(default_factory=list)
 
 
 def _ollama_root(base_url: str) -> str:
@@ -206,11 +207,9 @@ def select_model(
         preferred_family = _model_family(preferred_model)
 
         def _size_candidates(model_names: list[str]) -> list[str]:
-            """Sort by: smallest >= preferred first, then largest < preferred."""
+            """Sort by absolute distance from preferred size; break ties by preferring smaller."""
             sized = [(n, _param_size_sort_key(n, details_by_name.get(n))[0]) for n in model_names]
-            larger = sorted([(n, s) for n, s in sized if s >= preferred_size], key=lambda t: t[1])
-            smaller = sorted([(n, s) for n, s in sized if s < preferred_size], key=lambda t: -t[1])
-            return [n for n, _ in larger + smaller]
+            return [n for n, _ in sorted(sized, key=lambda t: (abs(t[1] - preferred_size), t[1]))]
 
         # Prefer same-family models
         same_family = [n for n in names if _model_family(n) == preferred_family]
@@ -227,6 +226,56 @@ def select_model(
         if preferred_model in ids:
             return preferred_model
         return ids[0] if ids else None
+
+
+def _scale_timeout(selected: str, model_cfg: ModelConfig, warnings: list[str]) -> float:
+    """Scale timeout proportionally when *selected* is larger than the preferred model."""
+    selected_size = _param_size_sort_key(selected, None)[0]
+    preferred_size = _param_size_sort_key(model_cfg.model, None)[0]
+    if selected_size > preferred_size > 0:
+        scale = selected_size / preferred_size
+        timeout = min(model_cfg.timeout_s * scale, 900.0)
+        warnings.append(
+            f"Using {selected} ({selected_size}B) instead of {model_cfg.model}; "
+            f"timeout scaled to {timeout:.0f}s"
+        )
+        return timeout
+    return model_cfg.timeout_s
+
+
+def resolve_routing_model(resolved: ResolvedLLM, config: ConciergeConfig) -> str:
+    """Pick the best model for routing from available models.
+
+    Prefers the configured routing model if available.  Otherwise picks the
+    smallest tool-capable model (routing is lightweight).  Falls back to the
+    resolved task model.
+    """
+    routing_cfg = config.models.get(config.routing_model_key)
+    if routing_cfg and routing_cfg.model in resolved.available_models:
+        return routing_cfg.model
+    # Pick smallest available model (routing is lightweight)
+    if resolved.available_models:
+        sized = [
+            (n, _param_size_sort_key(n, None)[0])
+            for n in resolved.available_models
+        ]
+        sized.sort(key=lambda t: t[1])
+        return sized[0][0]
+    return resolved.model
+
+
+def pick_smaller_model(available_models: list[str], current_model: str) -> str | None:
+    """Return the largest model smaller than *current_model*, or None."""
+    current_size = _param_size_sort_key(current_model, None)[0]
+    smaller = [
+        (n, _param_size_sort_key(n, None)[0])
+        for n in available_models
+        if _param_size_sort_key(n, None)[0] < current_size and n != current_model
+    ]
+    if not smaller:
+        return None
+    smaller.sort(key=lambda t: -t[1])  # largest first
+    return smaller[0][0]
 
 
 def _ollama_pull(model: str, ollama_root: str, timeout_s: int = 600) -> bool:
@@ -314,6 +363,7 @@ def _try_ollama(
     if not selected:
         return None
 
+    tool_capable_names = [n for n in (_ollama_model_name(m) for m in models if _is_tool_capable(m)) if n]
     resolved_config = ModelConfig(
         base_url=base_url,
         model=selected,
@@ -329,6 +379,7 @@ def _try_ollama(
         model=selected,
         model_config=resolved_config,
         resolved_backend="ollama",
+        available_models=tool_capable_names,
     )
 
 
@@ -355,6 +406,7 @@ def _try_vllm(base_url: str, model_cfg: ModelConfig) -> ResolvedLLM | None:
         model=selected,
         model_config=resolved_config,
         resolved_backend="vllm",
+        available_models=[s for s in openai_models if isinstance(s, str) and s],
     )
 
 
@@ -477,8 +529,10 @@ def resolve_llm(
         if models is not None:
             models = [m for m in models if _is_ollama_chat_capable(m)]
             names = [m for m in (_ollama_model_name(m) for m in models) if m]
+            tool_capable_names = [n for n in (_ollama_model_name(m) for m in models if _is_tool_capable(m)) if n]
             selected = select_model(model_cfg.model, models, is_ollama=True)
             if selected:
+                warnings: list[str] = []
                 if selected != model_cfg.model:
                     logger.warning(
                         "Preferred model %r not available; using fallback: %s (available: %s)",
@@ -486,6 +540,8 @@ def resolve_llm(
                     )
                 else:
                     logger.info("Resolved model: %s at %s", selected, model_cfg.base_url)
+                timeout = model_cfg.timeout_s
+                timeout = _scale_timeout(selected, model_cfg, warnings)
                 resolved_config = ModelConfig(
                     base_url=model_cfg.base_url,
                     model=selected,
@@ -493,13 +549,15 @@ def resolve_llm(
                     temperature=model_cfg.temperature,
                     top_p=model_cfg.top_p,
                     max_tokens=model_cfg.max_tokens,
-                    timeout_s=model_cfg.timeout_s,
+                    timeout_s=timeout,
                 )
                 return ResolvedLLM(
                     base_url=model_cfg.base_url,
                     model=selected,
                     model_config=resolved_config,
                     resolved_backend="ollama",
+                    available_models=tool_capable_names,
+                    warnings=warnings,
                 )
             # No models: optional auto-pull
             if config.auto_pull_if_missing:
@@ -513,6 +571,7 @@ def resolve_llm(
                         models2 = [m for m in models2 if _is_ollama_chat_capable(m)]
                     if models2:
                         selected = select_model(pull_model, models2, is_ollama=True) or _ollama_model_name(models2[0])
+                        tc_names2 = [n for n in (_ollama_model_name(m) for m in models2 if _is_tool_capable(m)) if n]
                         resolved_config = ModelConfig(
                             base_url=model_cfg.base_url,
                             model=selected,
@@ -527,6 +586,7 @@ def resolve_llm(
                             model=selected,
                             model_config=resolved_config,
                             resolved_backend="ollama",
+                            available_models=tc_names2,
                         )
             primary_error = f"No chat-capable models at {model_cfg.base_url}"
         else:
@@ -551,6 +611,7 @@ def resolve_llm(
                         model=selected,
                         model_config=resolved_config,
                         resolved_backend="vllm",
+                        available_models=[s for s in openai_models if isinstance(s, str) and s],
                     )
             primary_error = f"No backend reachable at {model_cfg.base_url}"
 

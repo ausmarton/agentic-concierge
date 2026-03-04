@@ -164,6 +164,7 @@ async def run(req: RunRequest):
             specialist_registry=specialist_registry,
             config=config,
             resolved_model_cfg=resolved.model_config,
+            resolved_llm=resolved,
             max_steps=40,
         )
     except httpx.ConnectError as e:
@@ -274,6 +275,7 @@ async def run_stream(req: RunRequest):
                 specialist_registry=specialist_registry,
                 config=config,
                 resolved_model_cfg=resolved.model_config,
+                resolved_llm=resolved,
                 max_steps=40,
                 event_queue=event_queue,
             )

@@ -43,15 +43,16 @@ def test_select_model_prefers_chat_models():
     assert selected == "qwen2.5:7b"
 
 
-def test_select_model_prefers_smallest_larger():
-    """When preferred 14b is unavailable, select smallest model >= 14b (32b), not 0.5b."""
+def test_select_model_closest_distance_no_close_match():
+    """When preferred 14b is unavailable and all options are far, pick the closest by distance."""
     models = [
         {"name": "qwen2.5:0.5b", "model": "qwen2.5:0.5b", "details": {"family": "qwen2.5", "parameter_size": "0.5B"}},
         {"name": "qwen2.5:32b", "model": "qwen2.5:32b", "details": {"family": "qwen2.5", "parameter_size": "32B"}},
         {"name": "qwen2.5:72b", "model": "qwen2.5:72b", "details": {"family": "qwen2.5", "parameter_size": "72B"}},
     ]
     selected = select_model("qwen2.5:14b", models, is_ollama=True)
-    assert selected == "qwen2.5:32b"
+    # 0.5b: distance=13.5, 32b: distance=18, 72b: distance=58 -> picks 0.5b (closest)
+    assert selected == "qwen2.5:0.5b"
 
 
 def test_select_model_excludes_tool_incapable():
@@ -412,3 +413,151 @@ def test_resolve_llm_primary_success_sets_resolved_backend():
     assert resolved.fallback_used is False
     assert resolved.resolved_backend == "ollama"
     assert resolved.warnings == []
+
+
+# ---------------------------------------------------------------------------
+# Closest distance selection tests
+# ---------------------------------------------------------------------------
+
+def test_select_model_closest_distance():
+    """preferred=14b, available=[0.5b, 8b, 32b] -> picks 8b (distance=6, not 32b=18)."""
+    models = [
+        {"name": "qwen2.5:0.5b", "model": "qwen2.5:0.5b", "details": {"family": "qwen2.5", "parameter_size": "0.5B"}},
+        {"name": "qwen2.5:8b", "model": "qwen2.5:8b", "details": {"family": "qwen2.5", "parameter_size": "8B"}},
+        {"name": "qwen2.5:32b", "model": "qwen2.5:32b", "details": {"family": "qwen2.5", "parameter_size": "32B"}},
+    ]
+    selected = select_model("qwen2.5:14b", models, is_ollama=True)
+    assert selected == "qwen2.5:8b"
+
+
+def test_select_model_closest_distance_tie_prefers_smaller():
+    """Equidistant models -> smaller one wins (3b and 17b are both distance=7 from 10b)."""
+    models = [
+        {"name": "qwen2.5:3b", "model": "qwen2.5:3b", "details": {"family": "qwen2.5", "parameter_size": "3B"}},
+        {"name": "qwen2.5:17b", "model": "qwen2.5:17b", "details": {"family": "qwen2.5", "parameter_size": "17B"}},
+    ]
+    selected = select_model("qwen2.5:10b", models, is_ollama=True)
+    assert selected == "qwen2.5:3b"
+
+
+def test_select_model_closest_same_family_first():
+    """Same-family models preferred, but now by closest distance within family."""
+    models = [
+        {"name": "qwen2.5:8b", "model": "qwen2.5:8b", "details": {"family": "qwen2.5", "parameter_size": "8B"}},
+        {"name": "qwen2.5:32b", "model": "qwen2.5:32b", "details": {"family": "qwen2.5", "parameter_size": "32B"}},
+        {"name": "llama3.1:14b", "model": "llama3.1:14b", "details": {"family": "llama", "parameter_size": "14B"}},
+    ]
+    # llama 14b is exact distance=0, but qwen family is preferred; within qwen, 8b (d=6) < 32b (d=18)
+    selected = select_model("qwen2.5:14b", models, is_ollama=True)
+    assert selected == "qwen2.5:8b"
+
+
+# ---------------------------------------------------------------------------
+# resolve_routing_model tests
+# ---------------------------------------------------------------------------
+
+def test_resolve_routing_model_exact_match():
+    """Configured routing model is available -> returns it."""
+    from agentic_concierge.infrastructure.llm_discovery import resolve_routing_model, ResolvedLLM
+    resolved = ResolvedLLM(
+        base_url="http://localhost:11434/v1",
+        model="qwen2.5:14b",
+        model_config=ModelConfig(base_url="http://localhost:11434/v1", model="qwen2.5:14b"),
+        available_models=["qwen2.5:7b", "qwen2.5:14b", "qwen2.5:32b"],
+    )
+    cfg = _make_config()
+    routing = resolve_routing_model(resolved, cfg)
+    assert routing == "qwen2.5:7b"  # DEFAULT_CONFIG routing_model_key='fast' -> model='qwen2.5:7b'
+
+
+def test_resolve_routing_model_fallback_smallest():
+    """Configured routing model not available -> picks smallest available."""
+    from agentic_concierge.infrastructure.llm_discovery import resolve_routing_model, ResolvedLLM
+    resolved = ResolvedLLM(
+        base_url="http://localhost:11434/v1",
+        model="qwen2.5:14b",
+        model_config=ModelConfig(base_url="http://localhost:11434/v1", model="qwen2.5:14b"),
+        available_models=["qwen2.5:3b", "qwen2.5:32b"],
+    )
+    cfg = _make_config()
+    routing = resolve_routing_model(resolved, cfg)
+    assert routing == "qwen2.5:3b"
+
+
+def test_resolve_routing_model_fallback_task_model():
+    """No models available -> returns task model."""
+    from agentic_concierge.infrastructure.llm_discovery import resolve_routing_model, ResolvedLLM
+    resolved = ResolvedLLM(
+        base_url="http://localhost:11434/v1",
+        model="qwen2.5:14b",
+        model_config=ModelConfig(base_url="http://localhost:11434/v1", model="qwen2.5:14b"),
+        available_models=[],
+    )
+    cfg = _make_config()
+    routing = resolve_routing_model(resolved, cfg)
+    assert routing == "qwen2.5:14b"
+
+
+# ---------------------------------------------------------------------------
+# pick_smaller_model tests
+# ---------------------------------------------------------------------------
+
+def test_pick_smaller_model():
+    """Returns the largest model smaller than current."""
+    from agentic_concierge.infrastructure.llm_discovery import pick_smaller_model
+    result = pick_smaller_model(["qwen2.5:3b", "qwen2.5:8b", "qwen2.5:32b"], "qwen2.5:32b")
+    assert result == "qwen2.5:8b"
+
+
+def test_pick_smaller_model_none_when_smallest():
+    """Already on smallest -> returns None."""
+    from agentic_concierge.infrastructure.llm_discovery import pick_smaller_model
+    result = pick_smaller_model(["qwen2.5:3b", "qwen2.5:8b"], "qwen2.5:3b")
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Timeout scaling tests
+# ---------------------------------------------------------------------------
+
+def test_timeout_scaling_for_larger_model():
+    """32b selected for 14b config -> timeout scaled ~2.3x."""
+    from agentic_concierge.infrastructure.llm_discovery import _scale_timeout
+    cfg = ModelConfig(base_url="http://localhost:11434/v1", model="qwen2.5:14b", timeout_s=360.0)
+    warnings: list[str] = []
+    timeout = _scale_timeout("qwen2.5:32b", cfg, warnings)
+    assert timeout > 360.0
+    expected = 360.0 * (32 / 14)
+    assert abs(timeout - expected) < 1.0
+    assert len(warnings) == 1
+    assert "timeout scaled" in warnings[0].lower()
+
+
+def test_timeout_scaling_no_scale_for_smaller():
+    """Smaller model selected -> no scaling, original timeout returned."""
+    from agentic_concierge.infrastructure.llm_discovery import _scale_timeout
+    cfg = ModelConfig(base_url="http://localhost:11434/v1", model="qwen2.5:14b", timeout_s=360.0)
+    warnings: list[str] = []
+    timeout = _scale_timeout("qwen2.5:8b", cfg, warnings)
+    assert timeout == 360.0
+    assert len(warnings) == 0
+
+
+# ---------------------------------------------------------------------------
+# available_models populated tests
+# ---------------------------------------------------------------------------
+
+def test_available_models_populated():
+    """ResolvedLLM.available_models populated after resolve."""
+    models = [
+        {"name": "qwen2.5:7b", "model": "qwen2.5:7b", "details": {"family": "qwen2.5", "parameter_size": "7B"}},
+        {"name": "qwen2.5:32b", "model": "qwen2.5:32b", "details": {"family": "qwen2.5", "parameter_size": "32B"}},
+        {"name": "nomic-embed-text", "details": {"family": "nomic-embed-text"}},
+    ]
+    with patch("agentic_concierge.infrastructure.llm_discovery.discover_ollama_models", return_value=models), \
+         patch("agentic_concierge.infrastructure.llm_bootstrap.ensure_llm_available", return_value=True):
+        resolved = resolve_llm(DEFAULT_CONFIG, "quality")
+
+    assert "qwen2.5:7b" in resolved.available_models
+    assert "qwen2.5:32b" in resolved.available_models
+    assert "nomic-embed-text" not in resolved.available_models

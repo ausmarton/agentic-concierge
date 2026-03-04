@@ -23,7 +23,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+import httpx
 
 from agentic_concierge.config import ConciergeConfig, ModelConfig
 from agentic_concierge.config.constants import MAX_LLM_CONTENT_IN_RUNLOG_CHARS
@@ -32,6 +34,9 @@ from agentic_concierge.application.ports import ChatClient, RunRepository, Speci
 from agentic_concierge.application.recruit import llm_recruit_specialist, RecruitmentResult
 from agentic_concierge.application.orchestrator import orchestrate_task, OrchestrationPlan
 from agentic_concierge.infrastructure.telemetry import get_tracer
+
+if TYPE_CHECKING:
+    from agentic_concierge.infrastructure.llm_discovery import ResolvedLLM
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +88,7 @@ async def execute_task(
     specialist_registry: SpecialistRegistry,
     config: ConciergeConfig,
     resolved_model_cfg: Optional[ModelConfig] = None,
+    resolved_llm: Optional["ResolvedLLM"] = None,
     max_steps: int = 40,
     event_queue: Optional[asyncio.Queue] = None,
 ) -> RunResult:
@@ -136,6 +142,7 @@ async def execute_task(
 
     # --- recruit -----------------------------------------------------------------
     model_cfg = resolved_model_cfg or config.models.get(task.model_key) or config.models["quality"]
+    available_models: List[str] = resolved_llm.available_models if resolved_llm else []
     plan: Optional[OrchestrationPlan] = None
 
     if task.specialist_id:
@@ -143,17 +150,22 @@ async def execute_task(
         required_capabilities: List[str] = []
         routing_method = "explicit"
     else:
-        routing_cfg = config.models.get(config.routing_model_key)
-        if routing_cfg is None:
-            logger.warning(
-                "routing_model_key %r not in config.models; using task model %r for routing",
-                config.routing_model_key, model_cfg.model,
-            )
-            routing_cfg = model_cfg
+        if resolved_llm is not None:
+            from agentic_concierge.infrastructure.llm_discovery import resolve_routing_model
+            routing_model = resolve_routing_model(resolved_llm, config)
+        else:
+            routing_cfg = config.models.get(config.routing_model_key)
+            if routing_cfg is None:
+                logger.warning(
+                    "routing_model_key %r not in config.models; using task model %r for routing",
+                    config.routing_model_key, model_cfg.model,
+                )
+                routing_cfg = model_cfg
+            routing_model = routing_cfg.model
         plan = await orchestrate_task(
             task.prompt, config,
             chat_client=chat_client,
-            model=routing_cfg.model,
+            model=routing_model,
         )
         specialist_ids = [a.specialist_id for a in plan.specialist_assignments]
         required_capabilities = plan.required_capabilities
@@ -248,6 +260,7 @@ async def execute_task(
                 event_queue=event_queue,
                 specialist_registry=specialist_registry,
                 plan=plan,
+                available_models=available_models,
             )
 
             # Update checkpoint after all parallel specialists complete
@@ -325,6 +338,7 @@ async def execute_task(
                     tracer=tracer,
                     specialist_id=specialist_id,
                     event_queue=event_queue,
+                    available_models=available_models,
                 )
 
                 all_specialist_payloads[specialist_id] = pack_payload
@@ -589,6 +603,7 @@ async def resume_execute_task(
                 tracer=tracer,
                 specialist_id=specialist_id,
                 event_queue=event_queue,
+                available_models=None,
             )
 
             all_specialist_payloads[specialist_id] = pack_payload
@@ -870,6 +885,7 @@ async def _run_task_force_parallel(
     event_queue: Optional[asyncio.Queue],
     specialist_registry: Any,
     plan: Optional[OrchestrationPlan] = None,
+    available_models: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Run all specialist packs concurrently and merge their payloads."""
 
@@ -901,6 +917,7 @@ async def _run_task_force_parallel(
             tracer=tracer,
             specialist_id=specialist_id,
             event_queue=event_queue,
+            available_models=available_models,
         )
 
     results = await asyncio.gather(
@@ -958,6 +975,7 @@ async def _execute_pack_loop(
     tracer: Any = None,
     specialist_id: str = "",
     event_queue: Optional[asyncio.Queue] = None,
+    available_models: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Run one specialist pack's tool loop until ``finish_task`` or ``max_steps``.
 
@@ -991,14 +1009,55 @@ async def _execute_pack_loop(
                 llm_span.set_attribute("specialist_id", specialist_id)
                 llm_span.set_attribute("model", model_cfg.model)
                 llm_span.set_attribute("message_count", len(messages))
-                response = await chat_client.chat(
-                    messages=messages,
-                    model=model_cfg.model,
-                    tools=pack.tool_definitions,
-                    temperature=model_cfg.temperature,
-                    top_p=model_cfg.top_p,
-                    max_tokens=model_cfg.max_tokens,
-                )
+                try:
+                    response = await chat_client.chat(
+                        messages=messages,
+                        model=model_cfg.model,
+                        tools=pack.tool_definitions,
+                        temperature=model_cfg.temperature,
+                        top_p=model_cfg.top_p,
+                        max_tokens=model_cfg.max_tokens,
+                    )
+                except httpx.ReadTimeout:
+                    from agentic_concierge.infrastructure.llm_discovery import pick_smaller_model
+                    from agentic_concierge.infrastructure.chat import build_chat_client
+                    original_model = model_cfg.model
+                    smaller = pick_smaller_model(available_models or [], model_cfg.model)
+                    if smaller is None:
+                        raise RuntimeError(
+                            f"LLM timed out after {model_cfg.timeout_s}s "
+                            f"(model={model_cfg.model}). No smaller model available. "
+                            "Try pulling a smaller model or increasing timeout_s."
+                        )
+                    logger.warning(
+                        "Timeout with %s; retrying with smaller model %s",
+                        model_cfg.model, smaller,
+                    )
+                    new_timeout = min(model_cfg.timeout_s * 1.5, 900.0)
+                    model_cfg = ModelConfig(
+                        base_url=model_cfg.base_url,
+                        model=smaller,
+                        backend=model_cfg.backend,
+                        api_key=model_cfg.api_key,
+                        temperature=model_cfg.temperature,
+                        top_p=model_cfg.top_p,
+                        max_tokens=model_cfg.max_tokens,
+                        timeout_s=new_timeout,
+                    )
+                    chat_client = build_chat_client(model_cfg)
+                    _emit(event_queue, "timeout_recovery", {
+                        "original_model": original_model,
+                        "fallback_model": smaller,
+                        "new_timeout_s": new_timeout,
+                    }, step=step_key)
+                    response = await chat_client.chat(
+                        messages=messages,
+                        model=smaller,
+                        tools=pack.tool_definitions,
+                        temperature=model_cfg.temperature,
+                        top_p=model_cfg.top_p,
+                        max_tokens=model_cfg.max_tokens,
+                    )
                 llm_span.set_attribute("tool_calls_returned", len(response.tool_calls))
 
             # Drain pending cloud_fallback events

@@ -2,8 +2,26 @@
 
 **Purpose:** Single source of truth for “where we are” so any human or agent can resume work across restarts and sessions.
 
-**Last updated:** 2026-03-04. Fast CI: **643 pass** (`make test`).
+**Last updated:** 2026-03-04. Fast CI: **660 pass** (`make test`).
 Rust launcher: **22 tests pass** (`make test-rust`).
+
+---
+
+## Model selection & timeout resilience — **complete** (2026-03-04)
+
+Fixes three interrelated bugs: model selection picking oversized models, routing
+model not validated against available models, and timeout crashes being
+unrecoverable.
+
+| Change | Files |
+|--------|-------|
+| `_size_candidates` closest-distance sort | `infrastructure/llm_discovery.py` |
+| `available_models` on `ResolvedLLM` | `infrastructure/llm_discovery.py` |
+| `resolve_routing_model()`, `pick_smaller_model()` | `infrastructure/llm_discovery.py` |
+| `_scale_timeout()` for oversized models | `infrastructure/llm_discovery.py` |
+| `resolved_llm` param + timeout recovery in `_execute_pack_loop` | `application/execute_task.py` |
+| Pass `resolved_llm` from callers | `interfaces/cli.py`, `interfaces/http_api.py` |
+| 13 new tests | `tests/test_llm_discovery.py`, `tests/test_execute_task.py` |
 
 ---
 
