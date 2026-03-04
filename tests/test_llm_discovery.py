@@ -44,15 +44,15 @@ def test_select_model_prefers_chat_models():
 
 
 def test_select_model_closest_distance_no_close_match():
-    """When preferred 14b is unavailable and all options are far, pick the closest by distance."""
+    """When preferred 14b is unavailable and all options are far, pick the closest by log-ratio."""
     models = [
         {"name": "qwen2.5:0.5b", "model": "qwen2.5:0.5b", "details": {"family": "qwen2.5", "parameter_size": "0.5B"}},
         {"name": "qwen2.5:32b", "model": "qwen2.5:32b", "details": {"family": "qwen2.5", "parameter_size": "32B"}},
         {"name": "qwen2.5:72b", "model": "qwen2.5:72b", "details": {"family": "qwen2.5", "parameter_size": "72B"}},
     ]
     selected = select_model("qwen2.5:14b", models, is_ollama=True)
-    # 0.5b: distance=13.5, 32b: distance=18, 72b: distance=58 -> picks 0.5b (closest)
-    assert selected == "qwen2.5:0.5b"
+    # log-scale: 0.5b is 28x away, 32b is 2.3x away, 72b is 5.1x away -> picks 32b
+    assert selected == "qwen2.5:32b"
 
 
 def test_select_model_excludes_tool_incapable():
@@ -430,14 +430,15 @@ def test_select_model_closest_distance():
     assert selected == "qwen2.5:8b"
 
 
-def test_select_model_closest_distance_tie_prefers_smaller():
-    """Equidistant models -> smaller one wins (3b and 17b are both distance=7 from 10b)."""
+def test_select_model_log_scale_prefers_closer_ratio():
+    """Log-scale: 5b (2x from 10b) is closer than 40b (4x from 10b)."""
     models = [
-        {"name": "qwen2.5:3b", "model": "qwen2.5:3b", "details": {"family": "qwen2.5", "parameter_size": "3B"}},
-        {"name": "qwen2.5:17b", "model": "qwen2.5:17b", "details": {"family": "qwen2.5", "parameter_size": "17B"}},
+        {"name": "qwen2.5:5b", "model": "qwen2.5:5b", "details": {"family": "qwen2.5", "parameter_size": "5B"}},
+        {"name": "qwen2.5:40b", "model": "qwen2.5:40b", "details": {"family": "qwen2.5", "parameter_size": "40B"}},
     ]
     selected = select_model("qwen2.5:10b", models, is_ollama=True)
-    assert selected == "qwen2.5:3b"
+    # log(5/10)=0.69, log(40/10)=1.39 -> 5b is closer
+    assert selected == "qwen2.5:5b"
 
 
 def test_select_model_closest_same_family_first():

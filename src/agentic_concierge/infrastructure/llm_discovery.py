@@ -9,6 +9,7 @@ Strategy: try the configured backend first, then fall back through the profile's
 from __future__ import annotations
 
 import logging
+import math
 import re
 import shutil
 import subprocess
@@ -207,9 +208,19 @@ def select_model(
         preferred_family = _model_family(preferred_model)
 
         def _size_candidates(model_names: list[str]) -> list[str]:
-            """Sort by absolute distance from preferred size; break ties by preferring smaller."""
+            """Sort by log-scale distance from preferred size; break ties by preferring smaller.
+
+            Log-scale (ratio) correctly handles the asymmetry: 0.5b is 28x
+            away from 14b while 32b is only 2.3x away.  Absolute distance
+            would incorrectly prefer the tiny (useless) model.
+            """
+            def _log_dist(size: float) -> float:
+                if size <= 0 or preferred_size <= 0:
+                    return 999.0
+                return abs(math.log(size / preferred_size))
+
             sized = [(n, _param_size_sort_key(n, details_by_name.get(n))[0]) for n in model_names]
-            return [n for n, _ in sorted(sized, key=lambda t: (abs(t[1] - preferred_size), t[1]))]
+            return [n for n, _ in sorted(sized, key=lambda t: (_log_dist(t[1]), t[1]))]
 
         # Prefer same-family models
         same_family = [n for n in names if _model_family(n) == preferred_family]
