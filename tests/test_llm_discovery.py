@@ -43,6 +43,27 @@ def test_select_model_prefers_chat_models():
     assert selected == "qwen2.5:7b"
 
 
+def test_select_model_prefers_smallest_larger():
+    """When preferred 14b is unavailable, select smallest model >= 14b (32b), not 0.5b."""
+    models = [
+        {"name": "qwen2.5:0.5b", "model": "qwen2.5:0.5b", "details": {"family": "qwen2.5", "parameter_size": "0.5B"}},
+        {"name": "qwen2.5:32b", "model": "qwen2.5:32b", "details": {"family": "qwen2.5", "parameter_size": "32B"}},
+        {"name": "qwen2.5:72b", "model": "qwen2.5:72b", "details": {"family": "qwen2.5", "parameter_size": "72B"}},
+    ]
+    selected = select_model("qwen2.5:14b", models, is_ollama=True)
+    assert selected == "qwen2.5:32b"
+
+
+def test_select_model_falls_back_to_largest_smaller():
+    """When no model >= preferred exists, select the largest smaller one."""
+    models = [
+        {"name": "qwen2.5:0.5b", "model": "qwen2.5:0.5b", "details": {"family": "qwen2.5", "parameter_size": "0.5B"}},
+        {"name": "qwen2.5:7b", "model": "qwen2.5:7b", "details": {"family": "qwen2.5", "parameter_size": "7B"}},
+    ]
+    selected = select_model("qwen2.5:14b", models, is_ollama=True)
+    assert selected == "qwen2.5:7b"
+
+
 def test_resolve_llm_filters_embedding_models():
     """resolve_llm with mocked discover returns a chat model even when an embedding model is first."""
     models = [

@@ -123,10 +123,14 @@ def _param_size_sort_key(name: str, details: dict | None) -> tuple:
     """Sort key: param size as float billions (smaller = faster / preferred fallback).
 
     Parses Ollama ``parameter_size`` strings such as ``"8.0B"``, ``"15B"``,
-    ``"33.4B"``, ``"334M"`` into comparable floats.  Unknown size sorts last.
+    ``"33.4B"``, ``"334M"`` into comparable floats.  Falls back to parsing
+    the model name (e.g. ``qwen2.5:14b`` → 14.0).  Unknown size sorts last.
     """
     param = (details or {}).get("parameter_size") or ""
     m = re.match(r"([\d.]+)\s*([BbMmKk])", param.strip())
+    if not m:
+        # Try extracting size from model name (e.g. "qwen2.5:14b", "llama3.1:8b")
+        m = re.search(r"[:\-]([\d.]+)\s*([BbMmKk])", name)
     if not m:
         return (999.0, name)  # unknown -> deprioritise
     val = float(m.group(1))
@@ -156,11 +160,15 @@ def select_model(
         names = [m for m in (_ollama_model_name(m) for m in available) if m]
         if preferred_model in names:
             return preferred_model
-        # Fallback: prefer smallest param size (faster, less likely to timeout)
+        # Fallback: prefer smallest model >= preferred size; else largest < preferred size
         name_to_entry = {_ollama_model_name(m): m for m in available}
         details_by_name = {n: (name_to_entry.get(n) or {}).get("details") for n in names}
-        sorted_names = sorted(names, key=lambda n: _param_size_sort_key(n, details_by_name.get(n)))
-        return sorted_names[0] if sorted_names else None
+        preferred_size = _param_size_sort_key(preferred_model, None)[0]
+        sized = [(n, _param_size_sort_key(n, details_by_name.get(n))[0]) for n in names]
+        larger = sorted([(n, s) for n, s in sized if s >= preferred_size], key=lambda t: t[1])
+        smaller = sorted([(n, s) for n, s in sized if s < preferred_size], key=lambda t: -t[1])
+        candidates = larger + smaller  # prefer larger first, then largest-of-smaller
+        return candidates[0][0] if candidates else None
     else:
         # OpenAI/vLLM: list of id strings
         ids = [s for s in available if isinstance(s, str) and s]

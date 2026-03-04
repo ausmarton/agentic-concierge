@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from agentic_concierge.config.features import FeatureSet
@@ -120,8 +123,12 @@ class BaseSpecialistPack:
             and browser_is_available()
         ):
             self._browser_tool = BrowserTool(self._workspace_path)
-            await self._browser_tool.aopen()
-            self._register_browser_tools()
+            try:
+                await self._browser_tool.aopen()
+                self._register_browser_tools()
+            except Exception as e:
+                logger.warning("Browser tool unavailable (browsers not installed?): %s", e)
+                self._browser_tool = None
 
     async def aclose(self) -> None:
         """Lifecycle hook: close browser if it was opened."""

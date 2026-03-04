@@ -318,6 +318,36 @@ async def test_screenshot_path_traversal_rejected(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_aopen_failure_does_not_crash_pack(tmp_path):
+    """When BrowserTool.aopen() fails (e.g. browsers not installed), the pack degrades gracefully."""
+    from agentic_concierge.infrastructure.specialists.base import BaseSpecialistPack
+    from agentic_concierge.config.features import FeatureSet, Feature
+
+    feature_set = FeatureSet(frozenset({Feature.BROWSER}))
+    pack = BaseSpecialistPack.__new__(BaseSpecialistPack)
+    pack._tools = {}
+    pack._finish_tool_def = None
+    pack._system_prompt = "test"
+    pack._specialist_id = "test"
+    pack._workspace_path = str(tmp_path)
+    pack._network_allowed = True
+    pack._feature_set = feature_set
+    pack._browser_tool = None
+    pack._mcp_sessions = []
+
+    with patch(
+        "agentic_concierge.infrastructure.tools.browser_tool.is_available",
+        return_value=True,
+    ):
+        # Simulate browser binaries not installed
+        with patch.object(BrowserTool, "aopen", side_effect=Exception("Executable doesn't exist")):
+            await pack.aopen()
+
+    # Pack should continue without browser — _browser_tool set to None
+    assert pack._browser_tool is None
+
+
+@pytest.mark.asyncio
 async def test_navigate_without_aopen_returns_error(tmp_path):
     """All tool methods return an error dict when the browser is not opened."""
     with patch(

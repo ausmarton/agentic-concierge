@@ -11,6 +11,28 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.3.11] — 2026-03-04
+
+### Fixed
+
+- **Model selection:** `select_model()` now picks the smallest model >= preferred
+  size instead of the absolute smallest. Falls back to largest model < preferred
+  when no larger model exists. Fixes selection of `qwen2.5:0.5b` (too small for
+  tool calling) when `qwen2.5:32b` was available. Also parses size from model
+  name (e.g. `qwen2.5:14b` → 14B) when `parameter_size` metadata is absent.
+- **Playwright crash:** `BaseSpecialistPack.aopen()` now catches browser launch
+  failures (e.g. browsers not installed) and logs a warning instead of crashing
+  the entire task. The pack continues without browser tools.
+
+### Tests
+
+- 3 new tests: `test_select_model_prefers_smallest_larger`,
+  `test_select_model_falls_back_to_largest_smaller`,
+  `test_aopen_failure_does_not_crash_pack`.
+- Fast CI: **646 pass** (was 643).
+
+---
+
 ## [0.3.10] — 2026-03-04
 
 ### Added
@@ -387,6 +409,7 @@ Initial public release of agentic-concierge, covering Phases 1–8.
 - Dockerfile (multi-stage builder + slim runtime) and docker-compose.yml (Ollama + agentic-concierge + model-pull).
 
 [Unreleased]: https://github.com/ausmarton/agentic-concierge/compare/v0.3.10...HEAD
+[0.3.11]: https://github.com/ausmarton/agentic-concierge/compare/v0.3.10...v0.3.11
 [0.3.10]: https://github.com/ausmarton/agentic-concierge/compare/v0.3.9...v0.3.10
 [0.3.9]: https://github.com/ausmarton/agentic-concierge/compare/v0.3.8...v0.3.9
 [0.3.8]: https://github.com/ausmarton/agentic-concierge/compare/v0.3.7...v0.3.8
