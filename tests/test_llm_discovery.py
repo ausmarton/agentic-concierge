@@ -471,8 +471,8 @@ def test_resolve_routing_model_exact_match():
     assert routing == "qwen2.5:7b"  # DEFAULT_CONFIG routing_model_key='fast' -> model='qwen2.5:7b'
 
 
-def test_resolve_routing_model_fallback_smallest():
-    """Configured routing model not available -> picks smallest available."""
+def test_resolve_routing_model_fallback_task_model_when_not_available():
+    """Configured routing model not available -> uses task model (not smallest)."""
     from agentic_concierge.infrastructure.llm_discovery import resolve_routing_model, ResolvedLLM
     resolved = ResolvedLLM(
         base_url="http://localhost:11434/v1",
@@ -482,7 +482,7 @@ def test_resolve_routing_model_fallback_smallest():
     )
     cfg = _make_config()
     routing = resolve_routing_model(resolved, cfg)
-    assert routing == "qwen2.5:3b"
+    assert routing == "qwen2.5:14b"
 
 
 def test_resolve_routing_model_fallback_task_model():

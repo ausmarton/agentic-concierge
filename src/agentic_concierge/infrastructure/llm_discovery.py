@@ -257,21 +257,13 @@ def _scale_timeout(selected: str, model_cfg: ModelConfig, warnings: list[str]) -
 def resolve_routing_model(resolved: ResolvedLLM, config: ConciergeConfig) -> str:
     """Pick the best model for routing from available models.
 
-    Prefers the configured routing model if available.  Otherwise picks the
-    smallest tool-capable model (routing is lightweight).  Falls back to the
-    resolved task model.
+    Prefers the configured routing model if available.  Otherwise uses the
+    resolved task model (routing needs reliable tool calling — using a tiny
+    model like 0.5b causes misrouting).
     """
     routing_cfg = config.models.get(config.routing_model_key)
     if routing_cfg and routing_cfg.model in resolved.available_models:
         return routing_cfg.model
-    # Pick smallest available model (routing is lightweight)
-    if resolved.available_models:
-        sized = [
-            (n, _param_size_sort_key(n, None)[0])
-            for n in resolved.available_models
-        ]
-        sized.sort(key=lambda t: t[1])
-        return sized[0][0]
     return resolved.model
 
 
