@@ -37,6 +37,7 @@ class BaseSpecialistPack:
         workspace_path: str = "",
         network_allowed: bool = True,
         feature_set: Optional["FeatureSet"] = None,
+        quality_gates: Optional[List[str]] = None,
     ):
         """
         Args:
@@ -52,6 +53,9 @@ class BaseSpecialistPack:
                 are suppressed when ``False``.  Defaults to ``True``.
             feature_set: Optional ``FeatureSet`` controlling which capabilities
                 are active.  When ``None`` no browser tools are registered.
+            quality_gates: Optional list of quality gate IDs (e.g.
+                ``["tests_verified"]``).  Used by ``validate_finish_payload()``
+                to enforce data-driven quality checks.
         """
         self._specialist_id = specialist_id
         self._system_prompt = system_prompt
@@ -60,6 +64,7 @@ class BaseSpecialistPack:
         self._workspace_path = workspace_path
         self._network_allowed = network_allowed
         self._feature_set = feature_set
+        self._quality_gates: List[str] = list(quality_gates or [])
         self._browser_tool: Optional[Any] = None  # Optional[BrowserTool]
 
     @property
@@ -96,11 +101,19 @@ class BaseSpecialistPack:
     def validate_finish_payload(self, payload: dict) -> Optional[str]:
         """Return an error message string if the payload fails quality checks, else None.
 
-        Subclasses (e.g. EngineeringSpecialistPack) override this to enforce
-        pack-specific quality gates such as requiring tests to pass before
-        finish_task is accepted.  The base implementation always returns None
-        (no additional quality checks beyond required-field validation).
+        Quality gates are data-driven via ``self._quality_gates``.  Currently
+        supported gate IDs:
+
+        - ``"tests_verified"``: rejects payload when ``tests_verified`` is
+          explicitly ``False``.  The LLM must call ``run_tests``, confirm all
+          tests pass, and then set ``tests_verified=true``.
         """
+        if "tests_verified" in self._quality_gates:
+            if payload.get("tests_verified") is False:
+                return (
+                    "tests_verified is False. Run run_tests to check the test suite. "
+                    "Fix any failures, then call finish_task with tests_verified=true."
+                )
         return None
 
     def set_feature_set(self, feature_set: "FeatureSet") -> None:

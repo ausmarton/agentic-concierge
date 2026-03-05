@@ -60,6 +60,7 @@ async def test_execute_task_uses_only_chat_client_chat_with_openai_params(tmp_pa
         specialist_registry=specialist_registry,
         config=config,
         max_steps=5,
+        max_review_iterations=0,
     )
 
     assert len(recorded) >= 1

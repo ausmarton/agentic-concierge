@@ -6,7 +6,7 @@ is integrated and working as expected; this script enforces that (no skips).
 
 - If the configured LLM is not reachable, we try to start it (e.g. ollama serve).
 - If we cannot reach or start an LLM, we exit with code 1 and do not run tests.
-- We run pytest without CONCIERGE_SKIP_REAL_LLM so all 42 tests run (including real-LLM E2E).
+- We run pytest without CONCIERGE_SKIP_REAL_LLM so all tests run (including real-LLM E2E).
 - Exit code is pytest's exit code (0 = all passed; non-zero = failure).
 
 Usage (from repo root):
@@ -69,13 +69,13 @@ def main():
         print(result.stderr, file=sys.stderr)
     if result.returncode != 0:
         return result.returncode
-    # Full validation requires that no tests were skipped (all 42 run, including real-LLM E2E).
+    # Full validation requires that no tests were skipped (all run, including real-LLM E2E).
     out = result.stdout + result.stderr
     if " skipped" in out or " skip" in out.lower():
         import re
         m = re.search(r"(\d+) skipped", out)
         n = int(m.group(1)) if m else 1
-        print("ERROR: Full validation requires all 42 tests to run (no skips).", n, "test(s) were skipped.", file=sys.stderr)
+        print("ERROR: Full validation requires all tests to run (no skips).", n, "test(s) were skipped.", file=sys.stderr)
         print("Real-LLM E2E tests were skipped. Ensure the configured model is available (e.g. ollama pull <model>).", file=sys.stderr)
         return 1
     return 0

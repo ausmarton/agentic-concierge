@@ -1,16 +1,17 @@
 # agentic-concierge: Requirements and Validation
 
-This document defines the current MVP (Phase 1). The long-term vision—use cases, principles, phasing, and alignment with the repo—is in [docs/VISION.md](docs/VISION.md).
+This document describes the **current system capabilities** as of v0.3.15. For the
+long-term vision, principles, and phasing see [docs/VISION.md](docs/VISION.md).
 
 ## Purpose
 
 agentic-concierge is a **quality-first agent fabric** for local inference, **built for Ollama**:
 
-1. **Routes** user prompts to a specialist pack (engineering or research) via keyword-based routing, or uses an explicitly chosen pack.
-2. **Runs** a workflow that drives an LLM with tools in a loop until the task is completed or a step limit is reached.
+1. **Orchestrates** user tasks by decomposing them into sub-tasks, selecting tools and roles, and assigning one or more specialist packs (via the LLM orchestrator or explicit `--pack`).
+2. **Runs** each specialist in a tool-calling loop until the task is completed, with quality gates (Gates 1–4) and an independent reviewer.
 3. **Produces** a per-run directory with a structured runlog and a workspace of artifacts.
 
-We **use Ollama** for local inference by default (default config points at localhost:11434 and Ollama model names). Local LLM is the **default and primary** path: the fabric ensures it's available (including starting it when unreachable) by default; opt out with `local_llm_ensure_available: false` if you manage the server yourself. Cloud is used only when local **capability or quality** is insufficient (future). Other OpenAI-compatible servers are supported via config override.
+We **use Ollama** for local inference by default (default config points at localhost:11434 and Ollama model names). Local LLM is the **default and primary** path: the fabric ensures it's available (including starting it when unreachable) by default; opt out with `local_llm_ensure_available: false` if you manage the server yourself. Other backends (vLLM, in-process via mistral.rs, generic OpenAI-compatible) are supported via config. Cloud is used only when local **capability or quality** is insufficient (via explicit `cloud_fallback` config).
 
 ---
 
@@ -19,101 +20,190 @@ We **use Ollama** for local inference by default (default config points at local
 ### FR1: CLI and API
 
 - **FR1.1** The CLI shall provide:
-  - `concierge run PROMPT` to run a task (with optional `--pack`, `--model-key`, `--no-network-allowed`).
-  - `concierge serve` to run the HTTP API.
+  - `concierge run PROMPT` — run a task (with optional `--pack`, `--model-key`, `--no-network-allowed`, `--stream`/`-s`, `--auto-approve`).
+  - `concierge serve` — run the HTTP API.
+  - `concierge logs list [--workspace] [--limit]` — list past runs (marks resumable runs).
+  - `concierge logs show RUN_ID [--workspace] [--kinds]` — show runlog events.
+  - `concierge logs search QUERY [--workspace] [--limit]` — keyword or semantic search over past runs.
+  - `concierge plan PROMPT` — run the orchestrator and display the plan without executing.
+  - `concierge resume RUN_ID` — resume an interrupted run from its checkpoint.
+  - `concierge doctor` — show hardware profile, backend health, and feature flags.
+  - `concierge bootstrap [--profile] [--non-interactive]` — detect hardware, configure profile, pull models.
 - **FR1.2** The HTTP API shall expose:
   - `GET /health` returning `{"ok": true}`.
-  - `POST /run` accepting `{ "prompt", "pack?", "model_key?", "network_allowed?" }` and returning the same result shape as the CLI.
+  - `POST /run` accepting `{ "prompt", "pack?", "model_key?", "network_allowed?" }` — blocking; returns finish_task payload + `_meta`.
+  - `POST /run/stream` — SSE streaming of all run events until completion.
+  - `GET /runs/{id}/status` — returns `completed`, `running`, or 404.
+  - `POST /runs/{id}/approve` — submit human approval/denial response for a pending approval request.
 
 ### FR2: Routing and packs
 
-- **FR2.1** If `--pack` is not specified, the router shall use capability-based routing:
-  1. Infer required capabilities from the task prompt using keyword matching against `CAPABILITY_KEYWORDS`.
-  2. Select the specialist whose declared `capabilities` best cover the inferred requirements.
-  3. Fall back to keyword scoring against each specialist's `keywords` list when no capabilities are inferred.
-  4. Final fallback: hardcoded heuristic (code/build/deploy words → engineering; otherwise → research).
-  The `required_capabilities` inferred and the `routing_method` used shall be logged in `runlog.jsonl` as a `"recruitment"` event and included in the HTTP `_meta` response field.
-- **FR2.2** Two built-in packs shall be supported:
-  - **engineering**: tools = shell, read_file, write_file, list_files; workflow = plan → implement → test → review → iterate.
-  - **research**: tools = web_search, fetch_url, write_file, read_file, list_files; workflow = scope → search → screen → extract → synthesize.
+- **FR2.1** If `--pack` is not specified, the **LLM orchestrator** decomposes the task:
+  1. One LLM call with a `create_plan` tool produces an `OrchestrationPlan` with specialist assignments, execution mode (sequential/parallel), synthesis flag, and reasoning.
+  2. Assignments may reference **template packs** (engineering, research, enterprise_research) or **dynamic packs** (custom tool selection + role description).
+  3. On any orchestrator error, falls back to the first available template (zero regression).
+  4. The plan's `routing_method`, `specialist_ids`, and `reasoning` are logged in the runlog as an `orchestration_plan` event and included in the HTTP `_meta` response field.
+- **FR2.2** Specialist packs are composed from a **central tool catalog** (8 tools: shell, read_file, write_file, list_files, run_tests, web_search, fetch_url, cross_run_search) and composable system prompt fragments. Three **template packs** provide curated defaults:
+  - **engineering**: tools = shell, read_file, write_file, list_files, run_tests; workflow = plan → implement → test → review → iterate; quality gate requires `tests_verified`.
+  - **research**: tools = web_search, fetch_url, write_file, read_file, list_files; workflow = scope → search → screen → extract → synthesize. Web tools only when `network_allowed=True`.
+  - **enterprise_research**: tools = cross_run_search, web_search, fetch_url, read_file, write_file, list_files; workflow adds staleness/confidence assessment; cross-run memory via run index.
+- **FR2.3** The orchestrator may also compose **dynamic packs** by selecting any subset of catalog tools and providing a role description. This allows task-specific specialist configurations without code changes.
 
 ### FR3: Execution
 
 - **FR3.1** Each run shall create a unique run directory under `workspace_root/runs/<run_id>` and a `workspace` subdirectory for artifacts.
 - **FR3.2** All LLM requests/responses and tool calls/results shall be appended to `runlog.jsonl` in the run directory.
 - **FR3.3** The LLM client shall call the configured base URL at `/chat/completions` with the configured model name and parameters (temperature, top_p, max_tokens).
+- **FR3.4** Multi-pack task forces: when the orchestrator assigns multiple specialists, they execute either sequentially (with context handoff between packs) or in parallel (via `asyncio.gather`, results merged into combined payload).
+- **FR3.5** Result synthesis: when `synthesis_required=True` and multiple specialists complete, a final LLM call with `synthesise_results` tool combines their outputs.
 
 ### FR4: Configuration
 
-- **FR4.1** Default configuration shall use **Ollama** (base_url http://localhost:11434/v1, models e.g. qwen2.5:7b / qwen2.5:14b) and define two model profiles (`fast`, `quality`) and the two packs with their workflows and keywords. The fabric shall **ensure the local LLM is available by default** (check reachability; if unreachable, start via `local_llm_start_cmd` and wait for readiness); config may set `local_llm_ensure_available: false` to opt out.
-- **FR4.2** If `CONCIERGE_CONFIG_PATH` is set to a valid file path, that file (JSON) shall be loaded and used as the fabric config; otherwise defaults are used.
+- **FR4.1** Default configuration shall use **Ollama** (base_url http://localhost:11434/v1, models e.g. qwen2.5:7b / qwen2.5:14b) and define two model profiles (`fast`, `quality`) and three template specialists with their workflows. The fabric shall **ensure the local LLM is available by default** (check reachability; if unreachable, start via `local_llm_start_cmd` and wait for readiness); config may set `local_llm_ensure_available: false` to opt out.
+- **FR4.2** If `CONCIERGE_CONFIG_PATH` is set to a valid file path, that file (JSON or YAML) shall be loaded and used as the fabric config; otherwise defaults are used.
+- **FR4.3** Configuration supports:
+  - `models`: keyed model configs with backend type (`ollama`, `generic`, `vllm`, `inprocess`), base_url, model name, API key, and parameters.
+  - `specialists`: keyed specialist configs with description, capabilities, optional `tools` list (for dynamic packs), optional `builder` (custom factory), `mcp_servers`, and `container_image`.
+  - `profile`: hardware profile tier (`auto`, `nano`, `small`, `medium`, `large`, `server`).
+  - `features`: per-feature overrides (inprocess, ollama, vllm, cloud, mcp, browser, embedding, telemetry, container).
+  - `resource_limits`: max_concurrent_agents, max_ram_mb, max_gpu_vram_mb.
+  - `run_index`: embedding model, provider (`jsonl`/`chromadb`), ChromaDB settings.
+  - `cloud_fallback`: model_key + policy (`no_tool_calls`/`malformed_args`/`always`).
+  - `telemetry`: enabled flag, exporter (`none`/`console`/`otlp`), endpoint.
+  - `routing_model_key`, `task_force_mode`, `require_human_approval_for`, `approval_timeout_s`.
 
 ### FR5: Quality and safety
 
-- **FR5.1** Engineering pack: the agent must not claim success without having run tests/build via tools; deploy/push steps must be proposed for human approval and not executed automatically.
-- **FR5.2** Research pack: only URLs actually fetched via `fetch_url` may be cited; screening log and evidence table shall be maintained in the workspace.
-- **FR5.3** When `network_allowed` is false, research pack shall not perform web search or URL fetch (tools shall return a clear “network disabled” response if invoked).
+- **FR5.1** Quality gates (enforced in `_execute_pack_loop`):
+  - **Gate 1**: The LLM must have called at least one non-finish tool before `finish_task` is accepted.
+  - **Gate 2**: All required fields in the `finish_task` payload must be present (derived from the pack's finish tool schema).
+  - **Gate 3**: Pack-specific validation via `validate_finish_payload()` — e.g. engineering rejects `tests_verified=False`.
+  - **Gate 4 (Review)**: An independent reviewer LLM inspects the workspace using read-only tools (`read_file`, `list_files`, `run_tests`) plus `approve_work`/`request_revision` decision tools. Fail-open: plain text = approval; errors = approval; max 2 rejections then accept with warning.
+- **FR5.2** Engineering pack: the agent must not claim success without having run tests via `run_tests` tool; deploy/push steps must be proposed for human approval and not executed automatically.
+- **FR5.3** Research pack: only URLs actually fetched via `fetch_url` may be cited; screening log and evidence table shall be maintained in the workspace.
+- **FR5.4** When `network_allowed` is false, web tools (web_search, fetch_url) are excluded from the pack's tool definitions entirely; if invoked despite exclusion, they return a clear "network disabled" response.
 
 ### FR6: Sandbox and tools
 
-- **FR6.1** File tools (read_file, write_file, list_files) shall be scoped to the run’s workspace directory; paths must not escape the sandbox.
-- **FR6.2** Shell commands shall be restricted to an allowlist (e.g. python, pytest, bash, git, pip, make, …) and run with cwd within the workspace.
+- **FR6.1** File tools (read_file, write_file, list_files) shall be scoped to the run's workspace directory; paths must not escape the sandbox. Absolute paths are rejected with a clear error message and hint.
+- **FR6.2** Shell commands shall be restricted to an allowlist (python, pytest, bash, git, pip, make, cargo, npm, …) and run with cwd within the workspace.
+- **FR6.3** `run_tests` tool: auto-detects test framework (pytest, cargo, npm, unittest) and returns structured pass/fail results.
+
+### FR7: LLM error recovery
+
+- **FR7.1** Corrective re-prompt: up to 2 plain-text (no tool call) LLM responses trigger a corrective re-prompt nudging the LLM to use tools; after the limit, text is treated as final payload.
+- **FR7.2** Loop detection: if the same (tool, args) signature appears ≥2 times in the last 8 tool calls, a `[SYSTEM] LOOP DETECTED` message is injected; `loop_detected` event emitted to runlog.
+- **FR7.3** Timeout recovery: when a model times out, the system attempts to fall back to a smaller available model.
+- **FR7.4** String-typed numerics: tool entry points coerce `timeout_s` from string to int/float, defending against small LLMs sending `"120"` instead of `120`.
+- **FR7.5** Adaptive escalation: when quality failure signals accumulate (plain-text exhaustion, persistent loops, review rejection at max), the system escalates to a larger available model and continues the conversation. Each trigger type fires at most once; total escalations capped at `max_escalations` (default 2). Bidirectional convergence with timeout recovery: quality issues → go bigger, timeouts → go smaller.
+
+### FR8: MCP tool servers
+
+- **FR8.1** Any specialist can be augmented with MCP tool servers via `mcp_servers` config. Tools from MCP servers are merged into the pack's tool definitions with `mcp__<server_name>__<tool>` naming.
+- **FR8.2** MCP sessions support `stdio` (subprocess) and `sse` (HTTP) transports with async lifecycle (`aopen`/`aclose`).
+- **FR8.3** The MCP augmentation is transparent: no pack factory changes required.
+
+### FR9: Containerised execution
+
+- **FR9.1** When `container_image` is set on a specialist config, the registry wraps the pack with `ContainerisedSpecialistPack`. All `shell` tool calls execute inside a Podman container with the workspace mounted at `/workspace`.
+- **FR9.2** Container wrapping is applied after MCP augmentation (wrapping order: inner → MCP → container).
+
+### FR10: Session continuation
+
+- **FR10.1** Checkpoint: after run creation and after each sequential specialist completes, an atomic checkpoint file (`checkpoint.json`) is written to the run directory.
+- **FR10.2** Resume: `concierge resume <run-id>` loads the checkpoint, skips completed specialists, and resumes the remaining ones.
+- **FR10.3** `concierge logs list` shows `(resumable)` next to interrupted runs.
+
+### FR11: Cross-run memory (run index)
+
+- **FR11.1** On successful completion, each run's summary is appended to `run_index.jsonl` and optionally embedded for semantic search.
+- **FR11.2** `concierge logs search` queries the index (keyword or semantic via Ollama embeddings / ChromaDB).
+- **FR11.3** The `cross_run_search` tool allows specialists to query prior run results.
+
+### FR12: Streaming and observability
+
+- **FR12.1** `POST /run/stream` provides SSE streaming of all runlog events in real-time.
+- **FR12.2** `concierge run --stream` renders events with Rich terminal formatting.
+- **FR12.3** OpenTelemetry tracing (optional dep `[otel]`): `fabric.execute_task`, `fabric.llm_call`, `fabric.tool_call` spans.
+- **FR12.4** `CONCIERGE_RATE_LIMIT=<n>` enables per-IP sliding-window rate limiting on the HTTP API (429 + Retry-After).
+
+### FR13: Multi-backend LLM support
+
+- **FR13.1** `ModelConfig.backend` selects the LLM client: `ollama` (default, with 400-retry and tool-support detection), `generic` (bare OpenAI-compatible), `vllm`, `inprocess` (mistral.rs via PyO3).
+- **FR13.2** `cloud_fallback` config wraps the chat client with `FallbackChatClient`; triggers when the configured policy fires (e.g. local model returns no tool calls).
+- **FR13.3** Adaptive backend resolution: `resolve_llm()` falls back through `BACKEND_PRIORITY[tier]` when the primary backend is unreachable. Probes backends in order; first to return models is used.
+- **FR13.4** Model selection: `select_model()` sorts available models by closest parameter-size distance to the configured model, with same-family preference and tool-incapable model filtering.
+
+### FR14: Hardware profiles and bootstrap
+
+- **FR14.1** `SystemProbe` detects CPU/RAM/GPU/disk/network/backends; `ProfileTier` (nano/small/medium/large/server) determines feature flags and model recommendations.
+- **FR14.2** `FeatureSet` gates capabilities: disabled features consume zero resources (no imports, no processes).
+- **FR14.3** `concierge bootstrap` orchestrates first-run: probe → advise → ensure backends → pull models → write `detected.json`.
+- **FR14.4** Browser tool (Playwright, optional): available when `Feature.BROWSER` is enabled; provides browse, click, fill, screenshot, extract_text, navigate.
+
+### FR15: Distribution (Rust launcher)
+
+- **FR15.1** Static ~5 MB Rust binary bootstraps the Python environment and exec-replaces itself with the Python `concierge` binary. No Python or pip required to get started.
+- **FR15.2** `--self-update`: checks GitHub Releases for newer version, downloads, verifies Ed25519 signature (optional/best-effort), applies atomic binary replacement, upgrades pip package.
+- **FR15.3** `CONCIERGE_EXTRA` support: ensures requested pip extras are installed on existing venvs.
+- **FR15.4** Targets: Linux (x86_64/aarch64 musl static), macOS (x86_64/aarch64 apple-darwin).
+
+### FR16: Human Approval (ADR-021)
+
+- **FR16.1** A `request_approval` tool is available to all specialists during `_execute_pack_loop`. When invoked, execution pauses and blocks on an `ApprovalChannel` until a human responds or `approval_timeout_s` expires.
+- **FR16.2** Three `ApprovalChannel` implementations:
+  - `AutoApprovalChannel` — always approves immediately (for testing and CI).
+  - `CliApprovalChannel` — prompts the user interactively at the terminal.
+  - `HttpApprovalChannel` — blocks until `POST /runs/{run_id}/approve` is called.
+- **FR16.3** CLI: `concierge run --auto-approve` uses `AutoApprovalChannel`; default is `CliApprovalChannel`.
+- **FR16.4** HTTP API: `POST /runs/{run_id}/approve` accepts `{ "approved": bool, "reason"?: str }` and unblocks the waiting `HttpApprovalChannel`.
+- **FR16.5** Config: `approval_timeout_s` on `ConciergeConfig` sets the maximum wait time for an approval response.
+- **FR16.6** Runlog events: `approval_requested`, `approval_granted`, `approval_denied`.
+
+### FR17: Agent Delegation (ADR-022)
+
+- **FR17.1** A `delegate_to_specialist` tool is available to specialists during `_execute_pack_loop`. When invoked, a sub-specialist is resolved from the registry and a nested `_execute_pack_loop` is spawned.
+- **FR17.2** Maximum delegation depth is 1 — a sub-specialist cannot delegate further.
+- **FR17.3** Sub-specialist step budget is capped at 15 to prevent runaway sub-tasks.
+- **FR17.4** The sub-specialist shares the parent's workspace and runlog. Delegation events (`delegation_start`, `delegation_complete`) are recorded.
+- **FR17.5** The sub-specialist's finish payload is returned to the parent as a tool result.
 
 ---
 
 ## Validation
 
-### Manual validation (no LLM required for basic checks)
+### Manual validation
 
-1. **CLI help**
-   - `concierge --help`, `concierge run --help`, `concierge serve --help` run without error.
-
-2. **Routing**
-   - With no server running, `concierge run "build a small API"` shall create a run dir under `.concierge/runs/` and fail at the first LLM call (connection error). The chosen pack in logs/metadata should be engineering.
-   - `concierge run "systematic review of X" --pack research` shall use research pack and fail at first LLM call; run dir and runlog.jsonl shall exist.
-
-3. **Run output structure**
-   - After any run (even failed), the run directory shall contain:
-     - `runlog.jsonl` (at least one `llm_request` event once the workflow starts).
-     - `workspace/` directory.
-
-4. **API**
-   - `concierge serve` and `curl http://127.0.0.1:8787/health` shall return `{"ok": true}`.
+1. **CLI help** — `concierge --help`, `concierge run --help`, `concierge serve --help` run without error.
+2. **Routing** — `concierge run "build a small API"` creates a run dir and selects a specialist via the orchestrator (or fails at LLM call if no server running).
+3. **Run output structure** — after any run (even failed), the run directory contains `runlog.jsonl` and `workspace/`.
+4. **API** — `concierge serve` and `curl http://127.0.0.1:8787/health` returns `{"ok": true}`.
+5. **Doctor** — `concierge doctor` shows hardware, profile tier, feature flags, backend health.
 
 ### End-to-end validation (real LLM server required)
 
-5. **Engineering (real verification)**
-   - Use the default Ollama server (`ollama serve` and `ollama pull qwen2.5:7b`), or any OpenAI-compatible server (set `CONCIERGE_CONFIG_PATH` to a config with the correct `base_url` and `model`).
-   - Run: `python scripts/verify_working_real.py`
-   - Expect: script exits 0; runlog contains **tool_call** and **tool_result** (model actually used tools); run completes with a final result. This confirms the fabric performs autonomously (uses tools and produces artifacts), not just that mocks work.
-   - Alternatively, run manually: `concierge run "Create a tiny FastAPI app with /health and unit tests, runnable with uvicorn." --pack engineering` and inspect `.concierge/runs/<id>/runlog.jsonl` and `workspace/`.
-
-6. **Research**
-   - Same server:
-     - `concierge run "Mini systematic review of post-quantum crypto performance." --pack research`
-   - Expect: run uses web_search/fetch_url (if network allowed), writes files to workspace, ends with `action: "final"` and deliverables/citations.
+6. **Engineering (real verification)** — `python scripts/verify_working_real.py` exits 0; runlog contains `tool_call` and `tool_result`; workspace has artifacts.
+7. **Research** — `concierge run "Mini systematic review of post-quantum crypto performance." --pack research`; expect web_search/fetch_url calls, workspace files, citations.
 
 ### Automated tests
 
 From the repo root with `pip install -e ".[dev]"`:
 
 ```bash
-pytest tests/ -v
+make test          # fast CI: 707 tests (no real LLM/MCP/Podman)
+make test-rust     # Rust launcher: 22 tests
 ```
 
-**Use the right technique for the job:** Mocked and unit tests give fast feedback and validate wiring, contracts, and behaviour in isolation. For **integration and "everything works together"** we rely on **at least a couple of E2E tests that run against a real LLM**. Those real-LLM E2E tests are essential to ensure the full stack is integrated and working as expected.
-
-- **Full validation (required to assert system works):** Run with a real LLM so the real-LLM E2E tests run and pass (no skips). Use `python scripts/validate_full.py`; all 42 tests must run. If any are skipped, validation fails.
-- **Fast CI:** `CONCIERGE_SKIP_REAL_LLM=1 pytest tests/ -v` runs 38 tests and skips the 4 real-LLM E2E tests. Use for quick feedback on wiring and unit/integration behaviour; it does not replace the need to run real-LLM E2E for integration assurance.
-
-All Phase 1 checks are automated. With a real LLM: router, sandbox, config, packs, integration, **engineering E2E with real LLM** (tool_call, tool_result, artifacts), **research E2E with real LLM**, **API POST /run with real LLM**, and **scripts/verify_working_real.py** run as part of pytest. Local LLM bootstrap (start when unreachable) is tested with mocks in fast CI; with full validation the real bootstrap can be used to start the LLM before running tests.
-
-**Real-LLM E2E (essential for integration):** We need at least a couple of end-to-end tests that run against a real LLM. They assert that the agent **uses tools** (runlog contains `tool_call` and `tool_result` events) and **produces artifacts** (e.g. workspace files). These tests are: `test_execute_task_engineering_real_llm`, `test_execute_task_research_pack_real_llm`, `test_api_post_run_real_llm`, and `test_verify_working_real_script`. For full validation they must **run** (not skip); use `scripts/validate_full.py` or run pytest with a real LLM available.
+- **Fast CI:** `make test` runs 707 tests with all real-LLM, real-MCP, and Podman tests deselected. Use for quick feedback on wiring, contracts, and behaviour.
+- **Real-LLM E2E:** `test_execute_task_engineering_real_llm`, `test_execute_task_research_pack_real_llm`, `test_api_post_run_real_llm`, `test_verify_working_real_script`. Essential for integration assurance — must run and pass with a real LLM for full validation.
+- **Real-MCP:** `pytest tests/ -k real_mcp -v` (requires npx + optional GITHUB_TOKEN).
+- **Podman:** `pytest tests/ -k podman -v` (requires Podman + pulled image).
+- **Rust launcher:** `cargo test --manifest-path launcher/Cargo.toml`.
+- **Lint:** `ruff check src/ tests/ --select E,W,F --ignore E501,F401`.
 
 ---
 
-## Out of scope (for this MVP)
+## Out of scope (current)
 
-- Config file format and merging semantics are minimal (override only when path is set).
-- No persistent vector store, MCP servers, or observability export.
-- Shell sandbox does not enforce network blocking; `network_allowed` is enforced for research web tools only.
+- Windows launcher binary (Phase 15).
+- Web UI, multi-tenant auth, plugin registry (Phase 17+).

@@ -61,14 +61,28 @@ class ModelConfig(BaseModel):
 class SpecialistConfig(BaseModel):
     """Specialist pack definition in config."""
     description: str
-    keywords: List[str] = Field(default_factory=list)
-    workflow: str  # Reserved for future; today we use specialist_id to load pack
+    keywords: List[str] = Field(
+        default_factory=list,
+        description="Deprecated. Retained for config backward-compatibility; unused by routing.",
+    )
+    workflow: str = Field(
+        "",
+        description="Reserved for future use; today we use specialist_id to load pack.",
+    )
     capabilities: List[str] = Field(
         default_factory=list,
         description=(
             "Capability IDs this pack can provide "
             "(e.g. 'code_execution', 'systematic_review', 'web_search'). "
-            "Used by the capability-based router (Phase 2+) to match tasks to packs."
+            "Used for required_capabilities derivation in orchestration plans."
+        ),
+    )
+    tools: Optional[List[str]] = Field(
+        None,
+        description=(
+            "Tool names for this specialist's pack (from tool_catalog). "
+            "When set, the specialist is built dynamically from these tools "
+            "instead of using a built-in template."
         ),
     )
     builder: Optional[str] = Field(
@@ -313,6 +327,13 @@ class ConciergeConfig(BaseModel):
         return self
     require_human_approval_for: List[str] = Field(
         default_factory=lambda: ["deploy", "push", "write_external"]
+    )
+    approval_timeout_s: float = Field(
+        600.0,
+        description=(
+            "Timeout in seconds for human approval requests. "
+            "If no response within this time, the request is denied (fail-closed)."
+        ),
     )
     # Local LLM is default and primary: ensure it's available (start if needed) by default.
     local_llm_ensure_available: bool = Field(

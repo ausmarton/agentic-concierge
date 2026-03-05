@@ -91,7 +91,7 @@ We can start with a small set of very specialised pillars (e.g. engineering + re
 - **Models:** We use **Ollama** for local models by default; aim for quality and correctness on par with strong cloud models for the tasks we support. Ensuring the local LLM is available (including starting it when unreachable) is **default behaviour**. Explicit **cloud fallback** only when the local **model** cannot meet the bar (quality or capability), not when the server is unreachable.
 - **Automation and tools:** MCP and other local automation; enterprise connectors (Confluence, Jira, GitHub, Rally) via MCP or custom tools, least‑privilege and sandboxed where possible.
 - **Observability:** Export traces (e.g. OpenTelemetry) and maintain runlogs and audit trails so we can verify behaviour and debug.
-- **Deployment and safety:** Deploy/push and other high-impact actions are proposed for human approval, not executed automatically by default.
+- **Deployment and safety:** Deploy/push and other high-impact actions require human approval via the `request_approval` tool (ADR-021). Specialists can also delegate sub-tasks to other specialists via `delegate_to_specialist` (ADR-022, max depth 1).
 
 **Cloud fallback (future).** When we add cloud support, it will be used only when the **local model** cannot meet **quality or capability** (e.g. task needs a model we don’t have locally, or the local model fails a quality bar). It will **not** be used when the local server is unreachable—that case is handled by ensuring the local LLM is available (start if needed). Implementation will be explicit (e.g. capability or quality check, or user choice), not “connection failed → try cloud”.
 
@@ -109,11 +109,30 @@ We can start with a small set of very specialised pillars (e.g. engineering + re
   - Phase 7: Semantic run index search (`embed_text` + `cosine_similarity` + `semantic_search_index` via Ollama; `RunIndexConfig` with `embedding_model`); GitHub MCP real integration tests + `docs/MCP_INTEGRATIONS.md`; `enterprise_research` specialist (`cross_run_search` tool, staleness/confidence notation, `enterprise_search` + `github_search` capabilities).
   - Phase 8: Parallel task force execution (`task_force_mode: parallel`; `asyncio.gather`; `_merge_parallel_payloads`); SSE streaming (`POST /run/stream`; `event_queue` on `execute_task`; `_emit` helper; `run_complete` event); run status endpoint (`GET /runs/{id}/status`).
 
-- **Phase 9+ (next):**
-  - Richer orchestration: dynamic re-recruitment when a pack's output reveals additional capability needs.
-  - Persistent agent identity / session continuation (resume an interrupted run).
-  - Agent-to-agent delegation: specialists that can themselves recruit sub-specialists.
-  - Richer quality gates: automated test execution as a condition for `finish_task`.
+- **Phases 9–14 (complete):**
+  - Phase 9: CLI streaming (`--stream` / `-s` with Rich rendering); corrective re-prompt (up to 2 plain-text retries); per-IP rate limiting (`CONCIERGE_RATE_LIMIT`); sandbox absolute-path error hint.
+  - Phase 10: Self-sizing bootstrap (`SystemProbe`, `ProfileTier`, `FirstRunBootstrap`); three-layer inference (in-process via mistral.rs, Ollama, vLLM); profile-based feature flags (`FeatureSet`); `concierge doctor` and `concierge bootstrap` CLI commands.
+  - Phase 11: Browser tool (Playwright, feature-gated); ChromaDB vector store backend for run index; `MCPAugmentedPack` lifecycle fix for inner pack `aopen`/`aclose`.
+  - Phase 12: Quality gates (Gates 1–3: prior work, required fields, pack-specific validation); `run_tests` tool; LLM orchestrator (`orchestrate_task`, `create_plan` tool, brief injection, result synthesis); session continuation (checkpoint, `concierge resume`, resumable runs).
+  - Phase 13: Rust thin launcher (static binary, venv bootstrap, self-update, `install.sh`).
+  - Phase 14: Pure-Rust tar extraction (no system `tar`); Ed25519 signed self-update (ADR-017); macOS targets; hot-path analysis (I/O-bound, no PyO3 needed).
+
+- **Post-Phase-14 (complete):**
+  - Adaptive backend resolution: `BACKEND_PRIORITY[tier]` fallback chain when primary backend unreachable (ADR-018).
+  - Model selection fixes: closest-distance sort, same-family preference, tool-incapable model blocklist, routing model validation, timeout recovery with smaller-model fallback.
+  - Dynamic pack composition: central tool catalog (8 tools), composable prompt fragments, template-based pack builders. Removed hardcoded `engineering.py`, `research.py`, `enterprise_research.py`, `recruit.py`, `capabilities.py`.
+  - Universal work review mechanism (Gate 4, ADR-019): independent reviewer LLM after doer finishes; read-only tools + approve/reject; fail-open design.
+
+- **Post-Phase-14 continued:**
+  - Adaptive escalation (ADR-020): bidirectional model convergence — quality issues escalate to larger model, timeouts fall back to smaller model. Three triggers, max 2 escalations.
+  - Human approval mechanism (ADR-021): `request_approval` tool handled inline in `_execute_pack_loop`; blocks on `ApprovalChannel` protocol. Three implementations (Auto, CLI, HTTP). CLI `--auto-approve`; HTTP `POST /runs/{run_id}/approve`; `approval_timeout_s` config.
+  - Agent-to-agent delegation (ADR-022): `delegate_to_specialist` tool spawns nested `_execute_pack_loop`. Max depth 1, step budget 15.
+
+- **Future:**
+  - Dynamic re-recruitment: re-plan when a pack's output reveals additional capability needs.
+  - Phase 15: Windows launcher + Homebrew tap.
+  - Phase 16: PyO3 extension (if profiling justifies) + additional specialist packs.
+  - Phase 17+: Multi-tenant, Web UI, plugin registry.
 
 The full blueprint is reflected in PLAN.md, BACKLOG.md, REQUIREMENTS.md, and this document.
 
@@ -125,18 +144,26 @@ Use this checklist to keep the repo aligned with the vision.
 
 | Vision element | Where it lives in repo | Status / notes |
 |----------------|------------------------|----------------|
-| Quality over speed | README, REQUIREMENTS (quality gates), workflow system prompts | Enforced in engineering/research rules and FR5. |
-| Local-first | Config `base_url`, `local_llm_ensure_available` (default True), README quickstart | Local LLM is default and primary; fabric ensures available (start if needed) by default. Cloud when local capability/quality insufficient (future). |
-| Cloud fallback | `infrastructure/chat/fallback.py`; `CloudFallbackConfig` in `config/schema.py`; `FallbackPolicy` (no_tool_calls / malformed_args / always); auto-wrap in `execute_task`; `cloud_fallback` runlog events | **Done (Phase 6, P6-4):** Triggers when local model fails a quality bar (no tool calls, malformed args), not on connection failure. `cloud_fallback: {model_key, policy}` in `ConciergeConfig`. |
-| Engineering pack: plan→implement→test→review | `infrastructure/specialists/engineering.py` | Implemented; deploy/push proposed only (FR5.1). |
-| Research pack: systematic review, citations, screening | `infrastructure/specialists/research.py` | Implemented; citations only from fetch_url (FR5.2). |
-| Deploy/push require human approval | Engineering system rules, FR5.1, `require_human_approval_for` in config | In rules and config; not auto-executed. |
-| Task-based recruitment (one pack per run) | `application/recruit.py`, `config/capabilities.py`, `config/schema.py` | **Phase 2 complete:** two-stage capability routing (prompt → required capabilities → pack by coverage); `required_capabilities` logged in runlog and HTTP `_meta`; one pack per run; multi-pack task force is Phase 3. |
-| Orchestrator decides what to spin up | Router today; no task decomposition yet | Vision: orchestrator always available; agents spun up on demand. No “toggle teams”. |
-| Enterprise (Confluence/Jira/GitHub/Rally) | `infrastructure/specialists/enterprise_research.py`; `docs/MCP_INTEGRATIONS.md`; `tests/test_mcp_real_github.py`; `github_search` + `enterprise_search` capabilities | **Done (Phase 7, P7-2+P7-3):** `enterprise_research` specialist with `cross_run_search` tool; GitHub MCP real integration test; `docs/MCP_INTEGRATIONS.md` config examples for GitHub, Confluence, Jira. Confluence/Jira real tests deferred pending official MCP packages. |
-| Observability | `infrastructure/telemetry.py`; `TelemetryConfig` in schema | **Done (Phase 4):** OpenTelemetry no-op shim + optional real OTEL (console/otlp); `fabric.execute_task` / `fabric.llm_call` / `fabric.tool_call` spans; `[otel]` optional dep. |
-| AMD / Fedora / Vulkan-friendly | README Quickstart (Fedora, Option A llama.cpp) | Documented; no NVIDIA assumption. |
-| Portable, clean, extensible | Structure: packs, workflows, tools, config | Packs and workflows are pluggable; config-driven. |
-| Phased build, blueprint upfront | README “Next upgrades”, REQUIREMENTS, this doc | Blueprint in docs; implementation follows phases. |
+| Quality over speed | REQUIREMENTS (FR5, Gates 1–4), composable prompt fragments in `prompts.py` | Enforced: Gates 1–3 in `_execute_pack_loop`; Gate 4 (reviewer) in `_review_specialist_work`; `run_tests` tool with quality gate. |
+| Local-first | Config `base_url`, `local_llm_ensure_available` (default True), `BACKEND_PRIORITY` fallback chain | Local LLM is default; fabric ensures available (start if needed); adaptive backend resolution falls back through `BACKEND_PRIORITY[tier]`. |
+| Cloud fallback | `infrastructure/chat/fallback.py`; `CloudFallbackConfig` in `config/schema.py`; `FallbackPolicy`; auto-wrap in `execute_task`; `cloud_fallback` runlog events | **Done (Phase 6):** Triggers when local model fails a quality bar (no tool calls, malformed args), not on connection failure. |
+| Engineering pack: plan→implement→test→review | `PACK_TEMPLATES[“engineering”]` in `dynamic_pack.py`; `ROLE_ENGINEERING` in `prompts.py` | **Done.** Template pack with shell, read/write/list files, run_tests; quality gate requires `tests_verified`; deploy/push proposed only. |
+| Research pack: systematic review, citations, screening | `PACK_TEMPLATES[“research”]` in `dynamic_pack.py`; `ROLE_RESEARCH` in `prompts.py` | **Done.** Template pack with web_search, fetch_url, read/write/list files; citations only from fetch_url. |
+| Deploy/push require human approval | `request_approval` tool in `execute_task.py`; `ApprovalChannel` in `application/approval.py`; `infrastructure/approval/` (Auto, CLI, HTTP); `approval_timeout_s` config | **Done (ADR-021).** Interactive pause-and-wait via `request_approval` tool; CLI `--auto-approve`; HTTP `POST /runs/{run_id}/approve`. |
+| Orchestrator decides what to spin up | `application/orchestrator.py`; `orchestrate_task()` with `create_plan` tool | **Done (Phase 12 + dynamic packs).** LLM orchestrator decomposes tasks, assigns template or dynamic packs, sets execution mode. Fallback to first template on error. |
+| Dynamic pack composition | `infrastructure/specialists/tool_catalog.py`, `dynamic_pack.py`, `prompts.py` | **Done (post-Phase 14).** Central tool catalog (8 tools); composable prompt fragments; `build_dynamic_pack()` for runtime composition. |
+| Agent-to-agent delegation | `delegate_to_specialist` tool in `execute_task.py`; ADR-022 | **Done (ADR-022).** Nested `_execute_pack_loop` with depth=1 guard and 15-step budget cap. |
+| Universal work review (Gate 4) | `_review_specialist_work()` in `execute_task.py`; `PROMPT_REVIEWER` in `prompts.py`; ADR-019 | **Done (post-Phase 14).** Independent reviewer LLM; read-only tools; approve/reject; fail-open; max 2 rejections. |
+| Enterprise (Confluence/Jira/GitHub/Rally) | `PACK_TEMPLATES[“enterprise_research”]` in `dynamic_pack.py`; `MCP_INTEGRATIONS.md`; `cross_run_search` tool in `tool_catalog.py` | **Done (Phase 7).** Enterprise research template with cross-run search; GitHub MCP integration tested; Confluence/Jira config examples in docs. |
+| Session continuation | `infrastructure/workspace/run_checkpoint.py`; `resume_execute_task()` in `execute_task.py`; `concierge resume` CLI | **Done (Phase 12).** Atomic checkpoint; resume interrupted runs; `(resumable)` marker in `logs list`. |
+| Multi-backend LLM | `infrastructure/chat/` — Ollama, Generic, vLLM, InProcess clients; `build_chat_client()` factory | **Done (Phases 4, 10).** Four backends; `ModelConfig.backend` selects; adaptive fallback via `BACKEND_PRIORITY`. |
+| Hardware profiles and bootstrap | `bootstrap/` package; `config/features.py`; `concierge doctor`/`bootstrap` CLI | **Done (Phase 10).** `SystemProbe`, `ProfileTier`, `FeatureSet`; zero-resource for disabled features. |
+| Browser tool | `infrastructure/tools/browser_tool.py`; `Feature.BROWSER` gating | **Done (Phase 11).** Playwright-based; feature-gated per profile; 6 async tool methods. |
+| Run index (cross-run memory) | `infrastructure/workspace/run_index.py`, `run_index_chroma.py`; `RunIndexConfig` | **Done (Phases 6–7, 11).** Keyword + semantic (Ollama embeddings) + ChromaDB vector store. |
+| Observability | `infrastructure/telemetry.py`; `TelemetryConfig`; runlog events | **Done (Phase 4).** OTEL spans + graceful no-op; SSE streaming (Phase 8); rate limiting (Phase 9). |
+| Rust launcher distribution | `launcher/` Rust crate; `install.sh`; GitHub Actions CI | **Done (Phases 13–14).** Static binary for Linux + macOS; Ed25519 signed self-update; pure-Rust tar extraction. |
+| AMD / Fedora / Vulkan-friendly | README Quickstart | Documented; no NVIDIA assumption. |
+| Portable, clean, extensible | Hexagonal architecture; dynamic packs; tool catalog; MCP; config-driven | Packs composable at runtime; tools registered in catalog; MCP for external integrations. |
+| Phased build, blueprint upfront | PLAN.md, BACKLOG.md, REQUIREMENTS.md, this doc | 14 phases + post-phase work complete; 22 ADRs in DECISIONS.md. |
 
 When adding features or refactoring, check this table and the principles in §2 to ensure the repo continues to follow the vision.

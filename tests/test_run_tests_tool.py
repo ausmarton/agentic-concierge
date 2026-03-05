@@ -328,3 +328,24 @@ def test_run_tests_unknown_framework_falls_back_to_pytest(tmp_path):
     cmd_arg = mock_run_cmd.call_args[0][1]
     assert cmd_arg[:3] == ["python", "-m", "pytest"]
     assert result["framework"] == "pytest"
+
+
+# ---------------------------------------------------------------------------
+# FR7.4: String-typed numeric coercion — LLMs send "120" not 120
+# ---------------------------------------------------------------------------
+
+def test_run_tests_string_timeout_coerced_to_int(tmp_path):
+    """run_tests coerces timeout_s from str to int (FR7.4 defence)."""
+    mock_result = {"stdout": "1 passed in 0.1s", "stderr": "", "returncode": 0}
+    with patch(
+        "agentic_concierge.infrastructure.tools.test_runner.run_cmd",
+        return_value=mock_result,
+    ) as mock_run_cmd:
+        policy = _make_policy(tmp_path)
+        # Pass timeout_s as a string — this is what small LLMs do
+        result = run_tests(policy, framework="pytest", timeout_s="120")  # type: ignore[arg-type]
+
+    assert result["passed"] is True
+    # The value passed to run_cmd must be an int, not a string
+    call_kwargs = mock_run_cmd.call_args
+    assert isinstance(call_kwargs.kwargs.get("timeout_s", call_kwargs[1].get("timeout_s")), int)

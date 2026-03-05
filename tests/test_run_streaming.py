@@ -122,6 +122,7 @@ async def test_execute_task_emits_recruitment_and_run_done():
         specialist_registry=registry,
         config=config,
         event_queue=event_queue,
+        max_review_iterations=0,
     )
 
     # Drain the queue into a list
@@ -207,6 +208,7 @@ async def test_execute_task_emits_llm_request_and_tool_call():
         specialist_registry=registry,
         config=config,
         event_queue=event_queue,
+        max_review_iterations=0,
     )
 
     events = []

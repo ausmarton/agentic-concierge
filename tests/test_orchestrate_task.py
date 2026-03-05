@@ -195,7 +195,7 @@ async def test_orchestrate_unknown_specialist_id_filtered():
 
 @pytest.mark.asyncio
 async def test_orchestrate_all_unknown_ids_falls_back():
-    """When all assigned specialist IDs are unknown, fall back to llm_recruit_specialist."""
+    """When all assigned specialist IDs are unknown, fall back to template."""
     all_unknown = LLMResponse(
         content=None,
         tool_calls=[ToolCallRequest(
@@ -209,25 +209,16 @@ async def test_orchestrate_all_unknown_ids_falls_back():
             },
         )],
     )
-    # After filtering, assignments is empty → fallback is triggered.
-    # The fallback calls llm_recruit_specialist which calls chat() again.
-    # Provide a second response for the fallback's select_capabilities call.
-    from agentic_concierge.domain import ToolCallRequest as TCR
-    fallback_response = LLMResponse(
-        content=None,
-        tool_calls=[TCR(call_id="r0", tool_name="select_capabilities",
-                        arguments={"capabilities": ["code_execution"]})],
-    )
     with patch.object(
         OllamaChatClient, "chat", new_callable=AsyncMock,
-        side_effect=[all_unknown, fallback_response],
+        return_value=all_unknown,
     ):
         client = OllamaChatClient(base_url="http://localhost:11434/v1", timeout_s=5.0)
         plan = await orchestrate_task("build", DEFAULT_CONFIG, chat_client=client, model="m")
 
-    # Fallback routes to engineering via keyword
+    # Fallback routes to first template
     assert len(plan.specialist_assignments) >= 1
-    assert plan.routing_method != "orchestrator"
+    assert plan.routing_method == "template_fallback"
 
 
 # ---------------------------------------------------------------------------
@@ -236,69 +227,48 @@ async def test_orchestrate_all_unknown_ids_falls_back():
 
 @pytest.mark.asyncio
 async def test_orchestrate_fallback_on_no_tool_call():
-    """When LLM returns no tool call, fall back to llm_recruit_specialist."""
+    """When LLM returns no tool call, fall back to template fallback."""
     no_tool = LLMResponse(content="I'll plan this", tool_calls=[])
-    from agentic_concierge.domain import ToolCallRequest as TCR
-    fallback_response = LLMResponse(
-        content=None,
-        tool_calls=[TCR(call_id="r0", tool_name="select_capabilities",
-                        arguments={"capabilities": ["code_execution"]})],
-    )
     with patch.object(
         OllamaChatClient, "chat", new_callable=AsyncMock,
-        side_effect=[no_tool, fallback_response],
+        return_value=no_tool,
     ):
         client = OllamaChatClient(base_url="http://localhost:11434/v1", timeout_s=5.0)
         plan = await orchestrate_task("build a service", DEFAULT_CONFIG, chat_client=client, model="m")
 
-    assert plan.routing_method in ("llm_routing", "keyword_routing", "keyword_fallback")
+    assert plan.routing_method == "template_fallback"
 
 
 @pytest.mark.asyncio
 async def test_orchestrate_fallback_on_wrong_tool_name():
-    """When LLM calls a different tool (not create_plan), fall back."""
+    """When LLM calls a different tool (not create_plan), fall back to template."""
     wrong_tool = LLMResponse(
         content=None,
         tool_calls=[ToolCallRequest(call_id="x", tool_name="select_capabilities",
                                     arguments={"capabilities": ["code_execution"]})],
     )
-    # The wrong_tool response is consumed by orchestrate_task's chat call.
-    # Then _fallback_plan calls llm_recruit_specialist, which calls chat() again.
-    # The fallback gets the same wrong_tool response again → keyword fallback.
-    from agentic_concierge.domain import ToolCallRequest as TCR
-    fallback_response = LLMResponse(
-        content=None,
-        tool_calls=[TCR(call_id="r0", tool_name="select_capabilities",
-                        arguments={"capabilities": ["code_execution"]})],
-    )
     with patch.object(
         OllamaChatClient, "chat", new_callable=AsyncMock,
-        side_effect=[wrong_tool, fallback_response],
+        return_value=wrong_tool,
     ):
         client = OllamaChatClient(base_url="http://localhost:11434/v1", timeout_s=5.0)
         plan = await orchestrate_task("build a service", DEFAULT_CONFIG, chat_client=client, model="m")
 
-    assert plan.routing_method != "orchestrator"
+    assert plan.routing_method == "template_fallback"
 
 
 @pytest.mark.asyncio
 async def test_orchestrate_fallback_on_exception():
-    """When chat() raises, fall back to llm_recruit_specialist gracefully."""
-    from agentic_concierge.domain import ToolCallRequest as TCR
-    fallback_response = LLMResponse(
-        content=None,
-        tool_calls=[TCR(call_id="r0", tool_name="select_capabilities",
-                        arguments={"capabilities": ["code_execution"]})],
-    )
+    """When chat() raises, fall back to template gracefully."""
     with patch.object(
         OllamaChatClient, "chat", new_callable=AsyncMock,
-        side_effect=[RuntimeError("connection failed"), fallback_response],
+        side_effect=RuntimeError("connection failed"),
     ):
         client = OllamaChatClient(base_url="http://localhost:11434/v1", timeout_s=5.0)
         plan = await orchestrate_task("build a service", DEFAULT_CONFIG, chat_client=client, model="m")
 
     assert len(plan.specialist_assignments) >= 1
-    assert plan.routing_method != "orchestrator"
+    assert plan.routing_method == "template_fallback"
 
 
 # ---------------------------------------------------------------------------

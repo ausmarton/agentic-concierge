@@ -1,4 +1,4 @@
-"""Tests for the enterprise research specialist pack (P7-3)."""
+"""Tests for the enterprise research specialist pack."""
 
 from __future__ import annotations
 
@@ -16,13 +16,11 @@ import pytest
 
 def _build(tmp_path: Path, *, network_allowed: bool = False):
     """Build an enterprise_research pack with a real workspace directory."""
-    from agentic_concierge.infrastructure.specialists.enterprise_research import (
-        build_enterprise_research_pack,
-    )
+    from agentic_concierge.infrastructure.specialists.dynamic_pack import build_template_pack
 
     workspace = str(tmp_path / "runs" / "run1" / "workspace")
     Path(workspace).mkdir(parents=True, exist_ok=True)
-    return build_enterprise_research_pack(workspace, network_allowed=network_allowed)
+    return build_template_pack("enterprise_research", workspace, network_allowed=network_allowed)
 
 
 # ---------------------------------------------------------------------------
@@ -161,34 +159,11 @@ async def test_cross_run_search_finds_entries_in_index(tmp_path: Path):
         ),
     )
 
-    from agentic_concierge.infrastructure.specialists.enterprise_research import (
-        build_enterprise_research_pack,
-    )
+    from agentic_concierge.infrastructure.specialists.dynamic_pack import build_template_pack
 
-    pack = build_enterprise_research_pack(workspace, network_allowed=False)
+    pack = build_template_pack("enterprise_research", workspace, network_allowed=False)
     result = await pack.execute_tool("cross_run_search", {"query": "kubernetes"})
 
     assert result["count"] == 1
     assert result["results"][0]["run_id"] == "prior_run_1"
     assert "kubernetes" in result["results"][0]["prompt"].lower()
-
-
-# ---------------------------------------------------------------------------
-# Capability routing
-# ---------------------------------------------------------------------------
-
-
-def test_enterprise_search_prompt_routes_to_enterprise_research():
-    from agentic_concierge.config.schema import DEFAULT_CONFIG
-    from agentic_concierge.application.recruit import recruit_specialist
-
-    result = recruit_specialist("search confluence for supply management policies", DEFAULT_CONFIG)
-    assert "enterprise_research" in result.specialist_ids
-
-
-def test_github_issue_prompt_routes_to_enterprise_research():
-    from agentic_concierge.config.schema import DEFAULT_CONFIG
-    from agentic_concierge.application.recruit import recruit_specialist
-
-    result = recruit_specialist("find all github issues related to authentication", DEFAULT_CONFIG)
-    assert "enterprise_research" in result.specialist_ids

@@ -14,7 +14,7 @@ referenced source files, and [DECISIONS.md](DECISIONS.md).
 **How to resume after an interruption**
 1. Read [STATE.md](STATE.md) — confirms current phase and last verified state.
 2. Read this file — find the first non-done item; that is what to work on.
-3. Run `make test` — confirm **618 pass** before touching code.
+3. Run `make test` — confirm **707 pass** before touching code.
 4. Start the item; mark it IN PROGRESS here and in STATE.md.
 
 ---
@@ -721,6 +721,10 @@ Phase 6 is complete (P6-1 through P6-4 all done; fast CI: 304 pass). Phase 7 foc
 
 | Item | Completed | Summary |
 |------|-----------|---------|
+| Agent Delegation (ADR-022) | 2026-03-05 | `delegate_to_specialist` tool handled inline in `_execute_pack_loop`; spawns sub-specialist via nested `_execute_pack_loop`. Max depth 1, step budget capped at 15. 10 tests (`test_delegation.py`). Fast CI: 707 pass (+10). |
+| Human Approval Mechanism (ADR-021) | 2026-03-05 | `request_approval` tool handled inline in `_execute_pack_loop`; blocks on `ApprovalChannel` protocol. Three implementations: `AutoApprovalChannel`, `CliApprovalChannel`, `HttpApprovalChannel`. CLI `--auto-approve` flag; HTTP `POST /runs/{run_id}/approve` endpoint; `approval_timeout_s` config. Runlog events: `approval_requested`, `approval_granted`, `approval_denied`. 12 tests (`test_approval.py`). Fast CI: 697 pass (+10). |
+| Universal work review mechanism (Gate 4) | 2026-03-05 | Independent reviewer LLM call after doer's `finish_task` passes Gates 1–3. Reviewer uses read-only tools (`read_file`, `list_files`, `run_tests`) + `approve_work`/`request_revision` decision tools. Fail-open (plain text = approval). Max 2 review iterations; `_review_warning` annotation on exhaustion. `PROMPT_REVIEWER` in `prompts.py`; `_review_specialist_work()`, `_SAFE_REVIEWER_TOOLS`, `_APPROVE_WORK_TOOL_DEF`, `_REQUEST_REVISION_TOOL_DEF` in `execute_task.py`. `max_review_iterations` param threaded through `execute_task`/`resume_execute_task`/`_execute_pack_loop`/`_run_task_force_parallel`. Runlog events: `review_start`, `review_approved`, `review_rejected`. ADR-019. 8 new tests (`test_review.py`); 10+ existing test files updated. Fast CI: 655 pass (+5). |
+| Dynamic Pack Composition | 2026-03-05 | Replaced hardcoded specialist packs with dynamic/template-based composition. `tool_catalog.py` (central registry of 8 tools), `dynamic_pack.py` (`build_dynamic_pack()` + `build_template_pack()` + `PackTemplate` + `PACK_TEMPLATES`). Orchestrator is sole routing path; keyword routing removed. Deleted: `engineering.py`, `research.py`, `enterprise_research.py`, `recruit.py`, `capabilities.py`. New tests: `test_tool_catalog.py`, `test_dynamic_pack.py`, `test_orchestrator_dynamic.py`. Fast CI: 650 pass. |
 | Adaptive backend resolution | 2026-03-04 | `resolve_llm()` refactored with fallback chain: tries configured primary, then `BACKEND_PRIORITY[tier]` backends in order (vLLM → Ollama → inprocess → cloud). `ResolvedLLM` extended with `warnings`, `fallback_used`, `resolved_backend`. SERVER profile now includes Ollama as fallback. `_ensure_nano_model()` GGUF download in bootstrap. Doctor install hints detect launcher venv. HTTP API `_meta` includes fallback info. ADR-018. 11 new tests. Fast CI: 635 pass (+7). |
 | P7-4: Docs update for Phase 7 | 2026-02-25 | STATE.md (phase 7 in progress → complete, CI 342); PLAN.md (Phase 7 deliverables all ticked); VISION.md §7 (Phase 7 in history) + §8 (enterprise integrations row updated); BACKLOG.md done table. |
 | P7-3: Enterprise research specialist | 2026-02-25 | infrastructure/specialists/enterprise_research.py — cross_run_search tool (queries run index), file tools, web tools (network_allowed); SYSTEM_PROMPT_ENTERPRISE_RESEARCH (staleness/confidence notation, multi-source, structured reports); enterprise_research in DEFAULT_CONFIG with enterprise_search + github_search caps; registry._DEFAULT_BUILDERS updated; 16 tests — system prompt, capabilities, tool defs, cross_run_search execution, routing. Fast CI: 342 pass (+16). |
@@ -755,6 +759,49 @@ Phase 6 is complete (P6-1 through P6-4 all done; fast CI: 304 pass). Phase 7 foc
 | Un-skip and fix `test_resolve_llm_filters_embedding_models` | 2026-02-24 | Wrong patch target fixed; test now passes |
 | 5 new tests (packs, prompt content) | 2026-02-24 | `finish_task` in definitions, OpenAI format validation, prompt content checks |
 | All 4 real-LLM E2E tests passing | 2026-02-24 | engineering, research, API POST, verify_working_real.py — all pass against Ollama 0.12.11 with llama3.1:8b |
+
+---
+
+## Adaptive Escalation — Dynamic Model Right-Sizing
+
+**Status: DONE — ADR-020, implemented 2026-03-05**
+
+**Concept:** Start every task with the smallest suitable model, monitor progress signals,
+and escalate to a more capable model when the current approach isn't working. This is the
+inverse of the existing timeout recovery (which downgrades to a smaller model on timeout).
+Together they form a bidirectional convergence: quality issues → go bigger, timeouts → go
+smaller.
+
+**Escalation signals (detected during `_execute_pack_loop`):**
+- Review rejections (Gate 4) — reviewer finds quality/correctness issues
+- Loop detection triggers — same tool+args repeated without progress
+- Quality gate failures (Gate 3) — `validate_finish_payload()` rejections
+- Corrective re-prompts — repeated finish_task errors for missing fields
+- Stalled steps — no meaningful tool calls after N turns
+
+**Escalation actions (in order of severity):**
+1. Swap to a larger model within the same family (e.g. qwen2.5:7b → qwen2.5:14b)
+2. Swap to a different model family if same-family upgrade unavailable
+3. Recruit a different specialist with a role better suited to the problem
+4. Modify the tool/role mix (add tools the specialist didn't originally have)
+
+**De-escalation (already exists):**
+- Timeout recovery (`pick_smaller_model()` in `llm_discovery.py`) — on timeout, retry
+  with the next smaller available model
+
+**Key design questions (to resolve before implementation):**
+- Where does escalation state live? (Per-pack loop? Per-task? Shared across task force?)
+- How many escalation attempts before giving up? (Probably 2, matching review iterations.)
+- Should escalation reset the doer's message history or continue from where it left off?
+- How to surface escalation decisions to the user? (Runlog events, CLI warnings, HTTP _meta?)
+- Should the reviewer model also be escalated, or should it always match the doer?
+
+**Depends on:** Universal work review mechanism (Gate 4) — provides the primary quality
+signal for escalation decisions.
+
+**Files likely affected:** `application/execute_task.py` (`_execute_pack_loop`),
+`infrastructure/llm_discovery.py` (model upgrade logic), `config/schema.py`
+(escalation policy config), `application/orchestrator.py` (specialist re-recruitment).
 
 ---
 

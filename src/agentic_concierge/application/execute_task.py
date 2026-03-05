@@ -1,21 +1,15 @@
 """Execute task use case.
 
-Flow: recruit specialist(s) → create run → for each specialist, run a tool
-loop until finish_task or max_steps; context from earlier packs is forwarded
-to later packs so the task force shares progress (sequential mode), or all
-packs run concurrently with the same initial prompt (parallel mode).
+Flow: orchestrate specialist(s) → create run → for each specialist, run a
+tool loop until finish_task or max_steps; context from earlier packs is
+forwarded to later packs so the task force shares progress (sequential mode),
+or all packs run concurrently with the same initial prompt (parallel mode).
+
+The orchestrator can assign template packs (engineering, research,
+enterprise_research) or compose dynamic packs by selecting tools and roles.
 
 Dependencies are injected (ports only); this module never imports from
 ``interfaces``.
-
-Phase 12 additions:
-- Quality gate: ``pack.validate_finish_payload()`` called before accepting finish_task.
-- Orchestrator: ``orchestrate_task()`` replaces ``llm_recruit_specialist``;
-  injects per-specialist briefs; emits ``orchestration_plan`` runlog event.
-- Synthesis: ``_synthesise_results()`` merges multi-specialist outputs when
-  ``plan.synthesis_required`` is True.
-- Checkpoint: ``RunCheckpoint`` written/updated/deleted; ``resume_execute_task``
-  restarts an interrupted run from its checkpoint.
 """
 
 from __future__ import annotations
@@ -23,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import httpx
 
@@ -31,8 +25,7 @@ from agentic_concierge.config import ConciergeConfig, ModelConfig
 from agentic_concierge.config.constants import MAX_LLM_CONTENT_IN_RUNLOG_CHARS
 from agentic_concierge.domain import RecruitError, RunId, RunResult, Task
 from agentic_concierge.application.ports import ChatClient, RunRepository, SpecialistRegistry
-from agentic_concierge.application.recruit import llm_recruit_specialist, RecruitmentResult
-from agentic_concierge.application.orchestrator import orchestrate_task, OrchestrationPlan
+from agentic_concierge.application.orchestrator import orchestrate_task, OrchestrationPlan, SpecialistBrief
 from agentic_concierge.infrastructure.telemetry import get_tracer
 
 if TYPE_CHECKING:
@@ -53,6 +46,140 @@ _MAX_PLAIN_TEXT_RETRIES = 2
 # warning so the LLM is forced to re-read the error and try something different.
 _LOOP_DETECT_WINDOW: int = 8
 _LOOP_DETECT_THRESHOLD: int = 2
+
+# Maximum times a reviewer can reject before the work is accepted with a warning.
+_MAX_REVIEW_ITERATIONS: int = 2
+
+# Maximum model escalations per pack loop (0 = disabled).
+_MAX_ESCALATIONS: int = 2
+
+# Delegation depth and step limits.
+_MAX_DELEGATION_DEPTH: int = 1
+_MAX_DELEGATION_STEPS: int = 15
+_MIN_DELEGATION_STEPS: int = 3
+
+# Read-only tools the reviewer is allowed to use from the doer's pack.
+_SAFE_REVIEWER_TOOLS: frozenset = frozenset({"read_file", "list_files", "run_tests"})
+
+_APPROVE_WORK_TOOL_DEF: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "approve_work",
+        "description": (
+            "Approve the specialist's work. Call this when the output is "
+            "correct and complete."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "comment": {
+                    "type": "string",
+                    "description": "Optional comment on the work quality.",
+                },
+            },
+        },
+    },
+}
+
+_REQUEST_REVISION_TOOL_DEF: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "request_revision",
+        "description": (
+            "Reject the specialist's work and request revisions. "
+            "Provide specific, actionable critique."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "critique": {
+                    "type": "string",
+                    "description": (
+                        "Specific, actionable critique explaining what "
+                        "needs to be fixed."
+                    ),
+                },
+            },
+            "required": ["critique"],
+        },
+    },
+}
+
+_REQUEST_APPROVAL_TOOL_DEF: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "request_approval",
+        "description": (
+            "Request human approval before performing a dangerous or irreversible "
+            "action (deploy, push, write to external systems, etc.). The loop will "
+            "pause until the human responds. You will receive an approved/denied "
+            "result and should proceed or abort accordingly."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "description": "Short label for the action (e.g. 'deploy to prod').",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Why you want to perform this action.",
+                },
+                "command": {
+                    "type": "string",
+                    "description": "Exact command or API call to execute.",
+                },
+            },
+            "required": ["action", "reason", "command"],
+        },
+    },
+}
+
+_DELEGATE_TOOL_DEF: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "delegate_to_specialist",
+        "description": (
+            "Delegate a sub-task to another specialist agent. The sub-specialist "
+            "runs in the same workspace and its finish payload is returned to you "
+            "as the tool result. Use this when you need capabilities outside your "
+            "own tool set (e.g. an engineering agent delegating research)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "sub_task": {
+                    "type": "string",
+                    "description": "Clear description of the sub-task to delegate.",
+                },
+                "specialist_type": {
+                    "type": "string",
+                    "description": (
+                        "Type of specialist to delegate to (e.g. 'research', "
+                        "'engineering', 'enterprise_research', or 'dynamic')."
+                    ),
+                },
+                "tools": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Tool names for a dynamic sub-specialist (only used when "
+                        "specialist_type='dynamic')."
+                    ),
+                },
+                "role": {
+                    "type": "string",
+                    "description": (
+                        "Role description for a dynamic sub-specialist (only used "
+                        "when specialist_type='dynamic')."
+                    ),
+                },
+            },
+            "required": ["sub_task", "specialist_type"],
+        },
+    },
+}
 
 
 def _emit(
@@ -80,6 +207,16 @@ def _get_brief(plan: Optional[OrchestrationPlan], specialist_id: str) -> str:
     return ""
 
 
+def _get_assignment(plan: Optional[OrchestrationPlan], specialist_id: str) -> Optional[SpecialistBrief]:
+    """Return the full SpecialistBrief for this specialist, or None."""
+    if plan is None:
+        return None
+    for b in plan.specialist_assignments:
+        if b.specialist_id == specialist_id:
+            return b
+    return None
+
+
 async def execute_task(
     task: Task,
     *,
@@ -91,10 +228,13 @@ async def execute_task(
     resolved_llm: Optional["ResolvedLLM"] = None,
     max_steps: int = 40,
     event_queue: Optional[asyncio.Queue] = None,
+    max_review_iterations: int = _MAX_REVIEW_ITERATIONS,
+    max_escalations: int = _MAX_ESCALATIONS,
+    approval_channel: Optional[Any] = None,
 ) -> RunResult:
     """Execute a task end-to-end.
 
-    1. Recruit specialist(s) via orchestrate_task (falls back to llm_recruit_specialist).
+    1. Orchestrate specialist(s) via orchestrate_task (falls back to template).
     2. Create a run directory + workspace.
     3. For each specialist, run a tool loop until ``finish_task`` or
        ``max_steps`` is reached.  When multiple specialists are recruited
@@ -113,6 +253,8 @@ async def execute_task(
             Falls back to ``config.models[task.model_key]`` when not provided.
         max_steps: Maximum LLM turns *per specialist* before aborting.
         event_queue: Optional asyncio.Queue for real-time event streaming (P8-2).
+        max_review_iterations: Max reviewer rejections before accepting (0 = disabled).
+        max_escalations: Max model escalations per pack loop (0 = disabled).
 
     Returns:
         ``RunResult`` with payload set to the final pack's ``finish_task`` args
@@ -261,6 +403,10 @@ async def execute_task(
                 specialist_registry=specialist_registry,
                 plan=plan,
                 available_models=available_models,
+                max_review_iterations=max_review_iterations,
+                max_escalations=max_escalations,
+                approval_channel=approval_channel,
+                config=config,
             )
 
             # Update checkpoint after all parallel specialists complete
@@ -291,7 +437,12 @@ async def execute_task(
             all_specialist_payloads: Dict[str, Any] = {}
 
             for pack_idx, specialist_id in enumerate(specialist_ids):
-                pack = specialist_registry.get_pack(specialist_id, workspace_path, task.network_allowed)
+                assignment = _get_assignment(plan, specialist_id)
+                pack = specialist_registry.get_pack(
+                    specialist_id, workspace_path, task.network_allowed,
+                    tools=assignment.tools if assignment else None,
+                    role=assignment.role if assignment else None,
+                )
 
                 if is_task_force:
                     pack_start_ev = {"specialist_id": specialist_id, "pack_index": pack_idx}
@@ -339,6 +490,13 @@ async def execute_task(
                     specialist_id=specialist_id,
                     event_queue=event_queue,
                     available_models=available_models,
+                    max_review_iterations=max_review_iterations,
+                    max_escalations=max_escalations,
+                    approval_channel=approval_channel,
+                    delegation_depth=_MAX_DELEGATION_DEPTH,
+                    specialist_registry=specialist_registry,
+                    workspace_path=workspace_path,
+                    config=config,
                 )
 
                 all_specialist_payloads[specialist_id] = pack_payload
@@ -463,8 +621,12 @@ async def resume_execute_task(
     specialist_registry: SpecialistRegistry,
     config: ConciergeConfig,
     resolved_model_cfg: Optional[ModelConfig] = None,
+    resolved_llm: Optional["ResolvedLLM"] = None,
     max_steps: int = 40,
     event_queue: Optional[asyncio.Queue] = None,
+    max_review_iterations: int = _MAX_REVIEW_ITERATIONS,
+    max_escalations: int = _MAX_ESCALATIONS,
+    approval_channel: Optional[Any] = None,
 ) -> RunResult:
     """Resume an interrupted run from its checkpoint.
 
@@ -482,6 +644,7 @@ async def resume_execute_task(
         resolved_model_cfg: Pre-resolved model config; falls back to checkpoint's model_key.
         max_steps: Maximum LLM turns per specialist.
         event_queue: Optional asyncio.Queue for streaming.
+        max_escalations: Max model escalations per pack loop (0 = disabled).
 
     Returns:
         ``RunResult`` with the final payload from the resumed run.
@@ -603,7 +766,14 @@ async def resume_execute_task(
                 tracer=tracer,
                 specialist_id=specialist_id,
                 event_queue=event_queue,
-                available_models=None,
+                available_models=resolved_llm.available_models if resolved_llm else [],
+                max_review_iterations=max_review_iterations,
+                max_escalations=max_escalations,
+                approval_channel=approval_channel,
+                delegation_depth=_MAX_DELEGATION_DEPTH,
+                specialist_registry=specialist_registry,
+                workspace_path=checkpoint.workspace_path,
+                config=config,
             )
 
             all_specialist_payloads[specialist_id] = pack_payload
@@ -868,6 +1038,156 @@ async def _synthesise_results(
 
 
 # ---------------------------------------------------------------------------
+# Independent reviewer (Gate 4)
+# ---------------------------------------------------------------------------
+
+async def _review_specialist_work(
+    *,
+    finish_payload: Dict[str, Any],
+    pack: Any,
+    model_cfg: ModelConfig,
+    chat_client: ChatClient,
+    run_repository: RunRepository,
+    run_id: RunId,
+    specialist_id: str,
+    event_queue: Optional[asyncio.Queue],
+    review_iteration: int,
+) -> tuple:
+    """Independently review a specialist's finish_task payload.
+
+    Runs a lightweight reviewer mini-loop (max 5 steps).  The reviewer can
+    inspect the workspace with read-only tools, then must call ``approve_work``
+    or ``request_revision``.  Plain text or reaching max steps without a
+    decision tool is treated as implicit approval (fail-open).
+
+    Returns:
+        ``(approved: bool, comment_or_critique: str)``
+    """
+    from agentic_concierge.infrastructure.specialists.prompts import PROMPT_REVIEWER
+
+    # Emit review_start event
+    _rev_start = {
+        "specialist_id": specialist_id,
+        "review_iteration": review_iteration,
+    }
+    run_repository.append_event(run_id, "review_start", _rev_start, step=None)
+    _emit(event_queue, "review_start", _rev_start)
+
+    # Build reviewer tool set: decision tools + safe read-only tools from doer
+    reviewer_tools = [_APPROVE_WORK_TOOL_DEF, _REQUEST_REVISION_TOOL_DEF]
+    for tool_def in pack.tool_definitions:
+        if tool_def["function"]["name"] in _SAFE_REVIEWER_TOOLS:
+            reviewer_tools.append(tool_def)
+
+    # Build reviewer messages
+    payload_json = json.dumps(finish_payload, indent=2, ensure_ascii=False)
+    rev_messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": PROMPT_REVIEWER},
+        {
+            "role": "user",
+            "content": (
+                f"Review this specialist's claimed output:\n\n{payload_json}"
+            ),
+        },
+    ]
+
+    _MAX_REVIEWER_STEPS = 5
+    for _rev_step in range(_MAX_REVIEWER_STEPS):
+        try:
+            response = await chat_client.chat(
+                messages=rev_messages,
+                model=model_cfg.model,
+                tools=reviewer_tools,
+                temperature=0.0,
+                max_tokens=model_cfg.max_tokens,
+            )
+        except Exception as exc:
+            # Reviewer LLM failure → fail-open (implicit approval)
+            logger.warning("Reviewer LLM call failed (%s); implicit approval", exc)
+            comment = "Approved (reviewer error; fail-open)"
+            _rev_ok = {
+                "specialist_id": specialist_id,
+                "comment": comment,
+                "review_iteration": review_iteration,
+            }
+            run_repository.append_event(
+                run_id, "review_approved", _rev_ok, step=None,
+            )
+            _emit(event_queue, "review_approved", _rev_ok)
+            return True, comment
+
+        if not response.has_tool_calls:
+            # Plain text = implicit approval (fail-open)
+            comment = response.content or "Approved (implicit)"
+            _rev_ok = {
+                "specialist_id": specialist_id,
+                "comment": comment,
+                "review_iteration": review_iteration,
+            }
+            run_repository.append_event(
+                run_id, "review_approved", _rev_ok, step=None,
+            )
+            _emit(event_queue, "review_approved", _rev_ok)
+            return True, comment
+
+        # Check for decision tools first
+        for tc in response.tool_calls:
+            if tc.tool_name == "approve_work":
+                comment = tc.arguments.get("comment", "Approved")
+                _rev_ok = {
+                    "specialist_id": specialist_id,
+                    "comment": comment,
+                    "review_iteration": review_iteration,
+                }
+                run_repository.append_event(
+                    run_id, "review_approved", _rev_ok, step=None,
+                )
+                _emit(event_queue, "review_approved", _rev_ok)
+                return True, comment
+
+            if tc.tool_name == "request_revision":
+                critique = tc.arguments.get("critique", "Revision requested")
+                _rev_rej = {
+                    "specialist_id": specialist_id,
+                    "critique": critique,
+                    "review_iteration": review_iteration,
+                }
+                run_repository.append_event(
+                    run_id, "review_rejected", _rev_rej, step=None,
+                )
+                _emit(event_queue, "review_rejected", _rev_rej)
+                return False, critique
+
+        # No decision tool — execute safe inspection tools and continue
+        rev_messages.append(
+            _make_assistant_tool_turn(response.content, response.tool_calls)
+        )
+        for tc in response.tool_calls:
+            if tc.tool_name in _SAFE_REVIEWER_TOOLS:
+                try:
+                    result = await pack.execute_tool(tc.tool_name, tc.arguments)
+                except Exception:
+                    result = {"error": "tool_failed"}
+                rev_messages.append(
+                    _make_tool_result(
+                        tc.call_id,
+                        json.dumps(result, ensure_ascii=False),
+                    )
+                )
+
+    # Max reviewer steps without decision → implicit approval
+    comment = "Approved (reviewer reached max steps without decision)"
+    _rev_ok = {
+        "specialist_id": specialist_id,
+        "comment": comment,
+        "review_iteration": review_iteration,
+    }
+    run_repository.append_event(run_id, "review_approved", _rev_ok, step=None)
+    _emit(event_queue, "review_approved", _rev_ok)
+    return True, comment
+
+
+# ---------------------------------------------------------------------------
 # Parallel task force helpers
 # ---------------------------------------------------------------------------
 
@@ -886,11 +1206,20 @@ async def _run_task_force_parallel(
     specialist_registry: Any,
     plan: Optional[OrchestrationPlan] = None,
     available_models: Optional[List[str]] = None,
+    max_review_iterations: int = 0,
+    max_escalations: int = 0,
+    approval_channel: Optional[Any] = None,
+    config: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Run all specialist packs concurrently and merge their payloads."""
 
     async def _run_one(specialist_id: str, pack_idx: int) -> Dict[str, Any]:
-        pack = specialist_registry.get_pack(specialist_id, workspace_path, task.network_allowed)
+        assignment = _get_assignment(plan, specialist_id)
+        pack = specialist_registry.get_pack(
+            specialist_id, workspace_path, task.network_allowed,
+            tools=assignment.tools if assignment else None,
+            role=assignment.role if assignment else None,
+        )
         pack_start_ev = {"specialist_id": specialist_id, "pack_index": pack_idx}
         run_repository.append_event(run_id, "pack_start", pack_start_ev, step=None)
         _emit(event_queue, "pack_start", pack_start_ev)
@@ -918,6 +1247,13 @@ async def _run_task_force_parallel(
             specialist_id=specialist_id,
             event_queue=event_queue,
             available_models=available_models,
+            max_review_iterations=max_review_iterations,
+            max_escalations=max_escalations,
+            approval_channel=approval_channel,
+            delegation_depth=_MAX_DELEGATION_DEPTH,
+            specialist_registry=specialist_registry,
+            workspace_path=workspace_path,
+            config=config,
         )
 
     results = await asyncio.gather(
@@ -959,6 +1295,97 @@ def _merge_parallel_payloads(
 
 
 # ---------------------------------------------------------------------------
+# Chat client rebuild helper (preserves FallbackChatClient wrapper)
+# ---------------------------------------------------------------------------
+
+def _rebuild_chat_client(new_model_cfg: ModelConfig, old_client: ChatClient) -> ChatClient:
+    """Build a new chat client for *new_model_cfg*, preserving FallbackChatClient wrapping.
+
+    When the outer ``execute_task()`` has wrapped the client with
+    ``FallbackChatClient`` for cloud fallback, a raw ``build_chat_client()``
+    call would lose that wrapper.  This helper detects the wrapper and
+    replaces only the inner local client, keeping cloud fallback intact.
+    """
+    from agentic_concierge.infrastructure.chat import build_chat_client
+    new_local = build_chat_client(new_model_cfg)
+    try:
+        from agentic_concierge.infrastructure.chat.fallback import FallbackChatClient
+        if isinstance(old_client, FallbackChatClient):
+            return FallbackChatClient(
+                local=new_local,
+                cloud=old_client._cloud,
+                cloud_model=old_client._cloud_model,
+                policy=old_client._policy,
+            )
+    except ImportError:
+        pass
+    return new_local
+
+
+# ---------------------------------------------------------------------------
+# Adaptive escalation helper (ADR-020)
+# ---------------------------------------------------------------------------
+
+def _attempt_escalation(
+    *,
+    trigger: str,
+    model_cfg: ModelConfig,
+    available_models: Optional[List[str]],
+    escalation_count: int,
+    escalated_triggers: set,
+    max_escalations: int,
+    run_repository: RunRepository,
+    run_id: RunId,
+    event_queue: Optional[asyncio.Queue],
+    step_key: str,
+) -> Optional[ModelConfig]:
+    """Try to escalate to a larger model.  Returns new ModelConfig on success, None on failure."""
+    if max_escalations <= 0:
+        return None
+    if escalation_count >= max_escalations:
+        logger.debug("Escalation cap reached (%d); trigger %r ignored", escalation_count, trigger)
+        return None
+    if trigger in escalated_triggers:
+        logger.debug("Trigger %r already escalated; ignoring", trigger)
+        return None
+
+    from agentic_concierge.infrastructure.llm_discovery import pick_larger_model
+    larger = pick_larger_model(available_models or [], model_cfg.model)
+    if larger is None:
+        logger.info("No larger model available for escalation (trigger=%s)", trigger)
+        return None
+
+    from agentic_concierge.infrastructure.llm_discovery import _scale_timeout
+    warnings: list[str] = []
+    new_timeout = _scale_timeout(larger, model_cfg, warnings)
+
+    new_cfg = ModelConfig(
+        base_url=model_cfg.base_url,
+        model=larger,
+        backend=model_cfg.backend,
+        api_key=model_cfg.api_key,
+        temperature=model_cfg.temperature,
+        top_p=model_cfg.top_p,
+        max_tokens=model_cfg.max_tokens,
+        timeout_s=new_timeout,
+    )
+
+    _esc_ev = {
+        "trigger": trigger,
+        "from_model": model_cfg.model,
+        "to_model": larger,
+        "escalation_count": escalation_count + 1,
+    }
+    run_repository.append_event(run_id, "model_escalated", _esc_ev, step=step_key)
+    _emit(event_queue, "model_escalated", _esc_ev, step=step_key)
+    logger.warning(
+        "Model escalated: %s → %s (trigger=%s, escalation #%d)",
+        model_cfg.model, larger, trigger, escalation_count + 1,
+    )
+    return new_cfg
+
+
+# ---------------------------------------------------------------------------
 # Pack tool loop
 # ---------------------------------------------------------------------------
 
@@ -976,6 +1403,13 @@ async def _execute_pack_loop(
     specialist_id: str = "",
     event_queue: Optional[asyncio.Queue] = None,
     available_models: Optional[List[str]] = None,
+    max_review_iterations: int = 0,
+    max_escalations: int = 0,
+    approval_channel: Optional[Any] = None,
+    delegation_depth: int = 0,
+    specialist_registry: Optional[Any] = None,
+    workspace_path: Optional[str] = None,
+    config: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Run one specialist pack's tool loop until ``finish_task`` or ``max_steps``.
 
@@ -994,6 +1428,20 @@ async def _execute_pack_loop(
     consecutive_plain_text = 0
     # Repetition detection: sliding window of recent (tool_name, args) signatures.
     tool_call_history: List[str] = []
+    # Gate 4: track how many times the reviewer has rejected.
+    review_iteration_count = 0
+    # Adaptive escalation state (ADR-020).
+    escalation_count = 0
+    escalated_triggers: set = set()
+    # Delegation counter for step-key prefixing.
+    delegation_num = 0
+
+    # Build effective tool definitions: pack tools + inline tools.
+    effective_tool_defs = list(pack.tool_definitions)
+    if approval_channel is not None:
+        effective_tool_defs.append(_REQUEST_APPROVAL_TOOL_DEF)
+    if delegation_depth > 0 and specialist_registry is not None:
+        effective_tool_defs.append(_DELEGATE_TOOL_DEF)
 
     try:
         await pack.aopen()
@@ -1013,14 +1461,13 @@ async def _execute_pack_loop(
                     response = await chat_client.chat(
                         messages=messages,
                         model=model_cfg.model,
-                        tools=pack.tool_definitions,
+                        tools=effective_tool_defs,
                         temperature=model_cfg.temperature,
                         top_p=model_cfg.top_p,
                         max_tokens=model_cfg.max_tokens,
                     )
                 except httpx.ReadTimeout:
                     from agentic_concierge.infrastructure.llm_discovery import pick_smaller_model
-                    from agentic_concierge.infrastructure.chat import build_chat_client
                     original_model = model_cfg.model
                     smaller = pick_smaller_model(available_models or [], model_cfg.model)
                     if smaller is None:
@@ -1044,7 +1491,7 @@ async def _execute_pack_loop(
                         max_tokens=model_cfg.max_tokens,
                         timeout_s=new_timeout,
                     )
-                    chat_client = build_chat_client(model_cfg)
+                    chat_client = _rebuild_chat_client(model_cfg, chat_client)
                     _emit(event_queue, "timeout_recovery", {
                         "original_model": original_model,
                         "fallback_model": smaller,
@@ -1053,7 +1500,7 @@ async def _execute_pack_loop(
                     response = await chat_client.chat(
                         messages=messages,
                         model=smaller,
-                        tools=pack.tool_definitions,
+                        tools=effective_tool_defs,
                         temperature=model_cfg.temperature,
                         top_p=model_cfg.top_p,
                         max_tokens=model_cfg.max_tokens,
@@ -1086,7 +1533,7 @@ async def _execute_pack_loop(
             if not response.has_tool_calls:
                 consecutive_plain_text += 1
                 if consecutive_plain_text <= _MAX_PLAIN_TEXT_RETRIES:
-                    tool_names = [t["function"]["name"] for t in pack.tool_definitions]
+                    tool_names = [t["function"]["name"] for t in effective_tool_defs]
                     correction = (
                         "You must call one of the available tools to continue — "
                         "do not respond with plain text.\n"
@@ -1109,6 +1556,35 @@ async def _execute_pack_loop(
                         run_id, "corrective_reprompt", _reprompt_ev, step=step_key,
                     )
                     _emit(event_queue, "corrective_reprompt", _reprompt_ev, step=step_key)
+                    continue
+
+                # Escalation trigger: plain_text_exhaustion (ADR-020)
+                new_cfg = _attempt_escalation(
+                    trigger="plain_text_exhaustion",
+                    model_cfg=model_cfg,
+                    available_models=available_models,
+                    escalation_count=escalation_count,
+                    escalated_triggers=escalated_triggers,
+                    max_escalations=max_escalations,
+                    run_repository=run_repository,
+                    run_id=run_id,
+                    event_queue=event_queue,
+                    step_key=step_key,
+                )
+                if new_cfg is not None:
+                    model_cfg = new_cfg
+                    chat_client = _rebuild_chat_client(model_cfg, chat_client)
+                    escalation_count += 1
+                    escalated_triggers.add("plain_text_exhaustion")
+                    consecutive_plain_text = 0  # reset for the new model
+                    messages.append({"role": "assistant", "content": response.content or ""})
+                    messages.append({"role": "user", "content": (
+                        "You must call one of the available tools to continue — "
+                        "do not respond with plain text.\n"
+                        f"Available tools: {', '.join(t['function']['name'] for t in effective_tool_defs)}.\n"
+                        "If the task is fully complete, call finish_task. "
+                        "Otherwise, use a tool to make progress."
+                    )})
                     continue
 
                 logger.warning(
@@ -1220,6 +1696,169 @@ async def _execute_pack_loop(
                     _emit(event_queue, "tool_result", _finish_ev, step=step_key)
                     continue
 
+                # --- Inline tool: request_approval (ADR-021) ---
+                if tc.tool_name == "request_approval":
+                    any_non_finish_tool_called = True
+                    from agentic_concierge.application.approval import (
+                        ApprovalRequest,
+                        ApprovalDecision,
+                    )
+                    req = ApprovalRequest(
+                        action=tc.arguments.get("action", ""),
+                        reason=tc.arguments.get("reason", ""),
+                        command=tc.arguments.get("command", ""),
+                        specialist_id=specialist_id,
+                    )
+                    _appr_req_ev = {
+                        "request_id": req.request_id,
+                        "action": req.action,
+                        "reason": req.reason,
+                        "command": req.command,
+                    }
+                    run_repository.append_event(
+                        run_id, "approval_requested", _appr_req_ev, step=step_key,
+                    )
+                    _emit(event_queue, "approval_requested", _appr_req_ev, step=step_key)
+
+                    if approval_channel is not None:
+                        try:
+                            decision = await approval_channel.request_approval(req)
+                        except Exception as exc:
+                            logger.warning(
+                                "Approval channel error (%s); denying (fail-closed)", exc
+                            )
+                            decision = ApprovalDecision(
+                                approved=False, comment=f"Channel error: {exc}"
+                            )
+                    else:
+                        decision = ApprovalDecision(approved=True, comment="auto-approved (no channel)")
+
+                    if decision.approved:
+                        _appr_ok = {
+                            "request_id": req.request_id,
+                            "approved": True,
+                            "comment": decision.comment,
+                        }
+                        run_repository.append_event(
+                            run_id, "approval_granted", _appr_ok, step=step_key,
+                        )
+                        _emit(event_queue, "approval_granted", _appr_ok, step=step_key)
+                    else:
+                        _appr_deny = {
+                            "request_id": req.request_id,
+                            "approved": False,
+                            "comment": decision.comment,
+                        }
+                        run_repository.append_event(
+                            run_id, "approval_denied", _appr_deny, step=step_key,
+                        )
+                        _emit(event_queue, "approval_denied", _appr_deny, step=step_key)
+
+                    result_dict = {
+                        "approved": decision.approved,
+                        "comment": decision.comment,
+                    }
+                    messages.append(
+                        _make_tool_result(tc.call_id, json.dumps(result_dict))
+                    )
+                    continue
+
+                # --- Inline tool: delegate_to_specialist (ADR-022) ---
+                if tc.tool_name == "delegate_to_specialist":
+                    any_non_finish_tool_called = True
+                    delegation_num += 1
+                    sub_task = tc.arguments.get("sub_task", "")
+                    spec_type = tc.arguments.get("specialist_type", "")
+                    sub_tools = tc.arguments.get("tools")
+                    sub_role = tc.arguments.get("role")
+
+                    _del_start_ev = {
+                        "parent_specialist": specialist_id,
+                        "sub_specialist": spec_type,
+                        "sub_task": sub_task[:200],
+                        "delegation_num": delegation_num,
+                    }
+                    run_repository.append_event(
+                        run_id, "delegation_start", _del_start_ev, step=step_key,
+                    )
+                    _emit(event_queue, "delegation_start", _del_start_ev, step=step_key)
+
+                    if specialist_registry is None or workspace_path is None:
+                        err = {"error": "delegation_not_available", "message": "Delegation infrastructure not configured."}
+                        messages.append(_make_tool_result(tc.call_id, json.dumps(err)))
+                        continue
+
+                    try:
+                        sub_pack = specialist_registry.get_pack(
+                            spec_type, workspace_path, True,
+                            tools=sub_tools, role=sub_role,
+                        )
+                    except (ValueError, KeyError) as exc:
+                        err = {"error": "unknown_specialist", "message": str(exc)}
+                        messages.append(_make_tool_result(tc.call_id, json.dumps(err)))
+                        _del_err_ev = {
+                            "parent_specialist": specialist_id,
+                            "sub_specialist": spec_type,
+                            "delegation_num": delegation_num,
+                            "error": str(exc),
+                        }
+                        run_repository.append_event(
+                            run_id, "delegation_complete", _del_err_ev, step=step_key,
+                        )
+                        _emit(event_queue, "delegation_complete", _del_err_ev, step=step_key)
+                        continue
+
+                    # Calculate step budget for sub-specialist.
+                    remaining = max_steps - step - 1
+                    sub_max = max(min(remaining // 2, _MAX_DELEGATION_STEPS), _MIN_DELEGATION_STEPS)
+
+                    sub_messages: List[Dict[str, Any]] = [
+                        {"role": "system", "content": sub_pack.system_prompt},
+                        {"role": "user", "content": f"Task:\n{sub_task}"},
+                    ]
+                    sub_step_prefix = f"{step_prefix}step_{step}.d{delegation_num}."
+
+                    try:
+                        sub_payload = await _execute_pack_loop(
+                            pack=sub_pack,
+                            messages=sub_messages,
+                            model_cfg=model_cfg,
+                            chat_client=chat_client,
+                            run_repository=run_repository,
+                            run_id=run_id,
+                            step_prefix=sub_step_prefix,
+                            max_steps=sub_max,
+                            tracer=tracer,
+                            specialist_id=spec_type,
+                            event_queue=event_queue,
+                            available_models=available_models,
+                            max_review_iterations=max_review_iterations,
+                            max_escalations=max_escalations,
+                            approval_channel=approval_channel,
+                            delegation_depth=0,  # cannot delegate further
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Delegation to %r failed: %s", spec_type, exc,
+                        )
+                        sub_payload = {"error": "delegation_failed", "message": str(exc)}
+
+                    _del_done_ev = {
+                        "parent_specialist": specialist_id,
+                        "sub_specialist": spec_type,
+                        "delegation_num": delegation_num,
+                        "summary": (sub_payload.get("summary") or sub_payload.get("executive_summary") or "")[:200],
+                    }
+                    run_repository.append_event(
+                        run_id, "delegation_complete", _del_done_ev, step=step_key,
+                    )
+                    _emit(event_queue, "delegation_complete", _del_done_ev, step=step_key)
+
+                    messages.append(
+                        _make_tool_result(tc.call_id, json.dumps(sub_payload, ensure_ascii=False))
+                    )
+                    continue
+
                 # Mark that the LLM has attempted at least one non-finish tool.
                 any_non_finish_tool_called = True
 
@@ -1285,6 +1924,42 @@ async def _execute_pack_loop(
                 messages.append(_make_tool_result(tc.call_id, json.dumps(result, ensure_ascii=False)))
 
                 if _recent_repeats >= _LOOP_DETECT_THRESHOLD:
+                    run_repository.append_event(
+                        run_id,
+                        "loop_detected",
+                        {"tool": tc.tool_name, "repeat_count": _recent_repeats},
+                        step=step_key,
+                    )
+                    _emit(
+                        event_queue,
+                        "loop_detected",
+                        {"tool": tc.tool_name, "repeat_count": _recent_repeats},
+                        step=step_key,
+                    )
+
+                    # Escalation trigger: persistent_loop (ADR-020)
+                    # On the second loop detection (repeat_count > threshold),
+                    # try escalating instead of just warning again.
+                    if _recent_repeats > _LOOP_DETECT_THRESHOLD:
+                        new_cfg = _attempt_escalation(
+                            trigger="persistent_loop",
+                            model_cfg=model_cfg,
+                            available_models=available_models,
+                            escalation_count=escalation_count,
+                            escalated_triggers=escalated_triggers,
+                            max_escalations=max_escalations,
+                            run_repository=run_repository,
+                            run_id=run_id,
+                            event_queue=event_queue,
+                            step_key=step_key,
+                        )
+                        if new_cfg is not None:
+                            model_cfg = new_cfg
+                            chat_client = _rebuild_chat_client(model_cfg, chat_client)
+                            escalation_count += 1
+                            escalated_triggers.add("persistent_loop")
+                            tool_call_history.clear()  # reset for the new model
+
                     _loop_warning = (
                         f"[SYSTEM] LOOP DETECTED: you have already called '{tc.tool_name}' "
                         f"with these exact arguments {_recent_repeats} time(s) recently "
@@ -1304,20 +1979,67 @@ async def _execute_pack_loop(
                         "injected loop-break warning",
                         step_key, tc.tool_name, _recent_repeats,
                     )
-                    run_repository.append_event(
-                        run_id,
-                        "loop_detected",
-                        {"tool": tc.tool_name, "repeat_count": _recent_repeats},
-                        step=step_key,
-                    )
-                    _emit(
-                        event_queue,
-                        "loop_detected",
-                        {"tool": tc.tool_name, "repeat_count": _recent_repeats},
-                        step=step_key,
-                    )
 
             if finish_payload is not None:
+                # Gate 4: Independent reviewer approval.
+                if max_review_iterations > 0:
+                    approved, review_comment = await _review_specialist_work(
+                        finish_payload=finish_payload,
+                        pack=pack,
+                        model_cfg=model_cfg,
+                        chat_client=chat_client,
+                        run_repository=run_repository,
+                        run_id=run_id,
+                        specialist_id=specialist_id,
+                        event_queue=event_queue,
+                        review_iteration=review_iteration_count,
+                    )
+                    if not approved:
+                        review_iteration_count += 1
+                        if review_iteration_count >= max_review_iterations:
+                            # Escalation trigger: review_rejection_max (ADR-020)
+                            new_cfg = _attempt_escalation(
+                                trigger="review_rejection_max",
+                                model_cfg=model_cfg,
+                                available_models=available_models,
+                                escalation_count=escalation_count,
+                                escalated_triggers=escalated_triggers,
+                                max_escalations=max_escalations,
+                                run_repository=run_repository,
+                                run_id=run_id,
+                                event_queue=event_queue,
+                                step_key=step_key,
+                            )
+                            if new_cfg is not None:
+                                model_cfg = new_cfg
+                                chat_client = _rebuild_chat_client(model_cfg, chat_client)
+                                escalation_count += 1
+                                escalated_triggers.add("review_rejection_max")
+                                review_iteration_count = 0  # reset for the new model
+                                critique_msg = (
+                                    f"[REVIEW REJECTED] An independent reviewer found "
+                                    f"issues with your work:\n\n{review_comment}\n\n"
+                                    f"Address these issues and call finish_task again."
+                                )
+                                messages.append(
+                                    {"role": "user", "content": critique_msg}
+                                )
+                                continue
+                            finish_payload["_review_warning"] = (
+                                f"Accepted after {review_iteration_count} review "
+                                f"rejection(s): {review_comment}"
+                            )
+                        else:
+                            critique_msg = (
+                                f"[REVIEW REJECTED] An independent reviewer found "
+                                f"issues with your work:\n\n{review_comment}\n\n"
+                                f"Address these issues and call finish_task again."
+                            )
+                            messages.append(
+                                {"role": "user", "content": critique_msg}
+                            )
+                            continue
+
                 payload = finish_payload
                 logger.info(
                     "Pack loop completed: step=%s pack=%s",

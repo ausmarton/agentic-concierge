@@ -2,8 +2,96 @@
 
 **Purpose:** Single source of truth for “where we are” so any human or agent can resume work across restarts and sessions.
 
-**Last updated:** 2026-03-04. Fast CI: **660 pass** (`make test`).
+**Last updated:** 2026-03-05. Fast CI: **707 pass** (`make test`).
 Rust launcher: **22 tests pass** (`make test-rust`).
+
+---
+
+## Agent Delegation — **complete** (2026-03-05)
+
+A `delegate_to_specialist` tool handled inline in `_execute_pack_loop` that spawns
+a sub-specialist via nested `_execute_pack_loop`. Max depth 1, step budget capped at 15.
+
+| Change | Files |
+|--------|-------|
+| `delegate_to_specialist` tool definition + inline handler | `application/execute_task.py` |
+| Nested `_execute_pack_loop` with depth guard + step cap | `application/execute_task.py` |
+| ADR-022 | `docs/DECISIONS.md` |
+| 10 tests | `tests/test_delegation.py` |
+
+---
+
+## Human Approval Mechanism — **complete** (2026-03-05)
+
+A `request_approval` tool handled inline in `_execute_pack_loop` that blocks on an
+`ApprovalChannel` protocol. Three implementations: `AutoApprovalChannel`,
+`CliApprovalChannel`, `HttpApprovalChannel`. CLI gets `--auto-approve`.
+HTTP gets `POST /runs/{run_id}/approve`. Config gets `approval_timeout_s`.
+
+| Change | Files |
+|--------|-------|
+| `ApprovalChannel` protocol + 3 implementations | `application/approval.py` (new), `infrastructure/approval/` (new) |
+| `request_approval` tool definition + inline handler | `application/execute_task.py` |
+| `--auto-approve` CLI flag | `interfaces/cli.py` |
+| `POST /runs/{run_id}/approve` endpoint | `interfaces/http_api.py` |
+| `approval_timeout_s` config | `config/schema.py` |
+| `approval_requested`, `approval_granted`, `approval_denied` runlog events | `application/execute_task.py` |
+| ADR-021 | `docs/DECISIONS.md` |
+| 12 tests | `tests/test_approval.py` |
+
+---
+
+## Adaptive Escalation — **complete** (2026-03-05)
+
+Bidirectional model convergence: quality issues → escalate to larger model,
+timeouts → fall back to smaller model (existing). Three escalation triggers:
+plain-text exhaustion, persistent loops, review rejection at max.
+
+| Change | Files |
+|--------|-------|
+| `pick_larger_model()` | `infrastructure/llm_discovery.py` |
+| `_attempt_escalation()`, `_rebuild_chat_client()`, escalation state, 3 trigger points | `application/execute_task.py` |
+| `max_escalations` param threading | `execute_task.py` |
+| `model_escalated` runlog event | `application/execute_task.py` |
+| 26 tests (8 integration + 8 unit `pick_larger_model` + 6 unit `_attempt_escalation` + 2 `_rebuild_chat_client` + 2 persistent loop) | `tests/test_escalation.py` |
+| ADR-020 | `docs/DECISIONS.md` |
+
+---
+
+## Universal work review mechanism (Gate 4) — **complete** (2026-03-05)
+
+Independent reviewer LLM call after doer's `finish_task` passes Gates 1–3.
+Reviewer uses read-only tools + `approve_work`/`request_revision` decision tools.
+Fail-open design (plain text = approval; max iterations = accept with warning).
+
+| Change | Files |
+|--------|-------|
+| `PROMPT_REVIEWER` fragment | `infrastructure/specialists/prompts.py` |
+| `_review_specialist_work()`, constants, Gate 4 logic | `application/execute_task.py` |
+| `max_review_iterations` param threading | `execute_task.py`, `ports.py` (unchanged) |
+| Runlog events: `review_start`, `review_approved`, `review_rejected` | `application/execute_task.py` |
+| 8 new tests | `tests/test_review.py` |
+| 10+ existing test files updated (`max_review_iterations=0`) | `tests/test_*.py` |
+| ADR-019 | `docs/DECISIONS.md` |
+
+---
+
+## Dynamic Pack Composition — **complete** (2026-03-05)
+
+Replaced hardcoded specialist packs with dynamic/template-based composition.
+Central tool catalog, composable prompt fragments, orchestrator-only routing.
+
+| Change | Files |
+|--------|-------|
+| Central tool registry (8 tools) | `infrastructure/specialists/tool_catalog.py` (new) |
+| Dynamic + template pack builders | `infrastructure/specialists/dynamic_pack.py` (new) |
+| Composable prompt fragments | `infrastructure/specialists/prompts.py` |
+| Data-driven quality gates | `infrastructure/specialists/base.py` |
+| Template/dynamic resolution | `infrastructure/specialists/registry.py` |
+| Orchestrator `tools`/`role` support | `application/orchestrator.py`, `execute_task.py`, `ports.py` |
+| `tools` field on `SpecialistConfig` | `config/schema.py` |
+| Deleted: `engineering.py`, `research.py`, `enterprise_research.py`, `recruit.py`, `capabilities.py` | — |
+| New tests | `test_tool_catalog.py`, `test_dynamic_pack.py`, `test_orchestrator_dynamic.py` |
 
 ---
 
@@ -283,7 +371,7 @@ All Phase 1 functional requirements (FR1–FR6 in REQUIREMENTS.md) have automate
 **The backlog is the canonical source for what to work on next.**
 
 1. Read [BACKLOG.md](BACKLOG.md) — find the first non-done item; that is what to work on.
-2. Run `pytest tests/ -k “not real_llm and not verify and not real_mcp”` — confirm **599 pass** before touching code.
+2. Run `pytest tests/ -k “not real_llm and not verify and not real_mcp”` — confirm **707 pass** before touching code.
 3. Phase 12 is complete — see BACKLOG.md for Phase 13 planning or add new items.
 4. See [DECISIONS.md](DECISIONS.md) for rationale behind key architectural choices.
 

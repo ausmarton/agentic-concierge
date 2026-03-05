@@ -72,10 +72,10 @@ This document defines **phases**, **deliverables**, and **verification gates** s
 
 ### Phase 1 verification gate
 
-- [ ] **Full validation:** `python scripts/validate_full.py` passes (ensures real LLM, then all 42 tests run including at least a couple of real-LLM E2E tests; those E2E runs are essential for integration assurance).
-- [ ] `concierge run "list files" --pack engineering` creates `.concierge/runs/<id>/runlog.jsonl` and `workspace/` (fails at LLM if no server; that’s OK).
-- [ ] `concierge serve` and `curl http://127.0.0.1:8787/health` return `{"ok": true}`.
-- [ ] REQUIREMENTS.md “Manual validation” items 1–4 pass.
+- [x] **Full validation:** `python scripts/validate_full.py` passes (ensures real LLM, then all tests run including real-LLM E2E).
+- [x] `concierge run “list files” --pack engineering` creates `.concierge/runs/<id>/runlog.jsonl` and `workspace/` (fails at LLM if no server; that’s OK).
+- [x] `concierge serve` and `curl http://127.0.0.1:8787/health` return `{“ok”: true}`.
+- [x] REQUIREMENTS.md “Manual validation” items 1–4 pass.
 
 **Phase 1 acceptance (we're done when):** All 13 deliverables implemented; full validation (scripts/validate_full.py) run and passed so at least a couple of real-LLM E2E tests have run and passed (integration assurance); manual checks: CLI help, `concierge run` creates run dir + runlog + workspace, `concierge serve` + `/health` returns `{"ok": true}`. Update STATE.md to “Phase 1 complete” and set “Next: Phase 2”.
 
@@ -215,8 +215,23 @@ This document defines **phases**, **deliverables**, and **verification gates** s
 ## Summary
 
 - **Resume by:** Reading STATE.md → PLAN.md (current phase) → run verification → do next deliverable.
-- **Always:** Keep STATE.md updated when completing or starting work; run `pytest tests/ -v` before considering a phase done.
-- **Value:** Phase 1 delivers a working, testable, documented fabric; Phase 2 aligns routing with the vision (task → capabilities → recruit); Phase 3 enables multi-pack task forces; Phase 4 adds observability and multi-backend LLM; Phase 5 adds MCP tool server support; Phase 6 adds workspace isolation (Podman), cross-run memory (run index), real MCP verification, and cloud LLM fallback; Phase 7 upgrades to semantic search, real enterprise integrations (GitHub, Confluence, Jira), and an enterprise research specialist; Phase 8 adds parallel task forces, SSE streaming, and run status.
+- **Always:** Keep STATE.md updated when completing or starting work; run `make test` before considering a phase done.
+- **Value by phase:**
+  - **Phase 1:** Working fabric with engineering + research packs, keyword router, CLI, HTTP API, sandbox, runlog.
+  - **Phase 2:** Capability-based routing (task → capabilities → pack by coverage).
+  - **Phase 3:** Multi-pack task forces with sequential context handoff.
+  - **Phase 4:** Multi-backend LLM (`ModelConfig.backend`), `concierge logs` CLI, OpenTelemetry tracing.
+  - **Phase 5:** MCP tool server support (`MCPAugmentedPack`, transparent wrapping).
+  - **Phase 6:** Podman workspace isolation, cross-run memory (run index), cloud LLM fallback.
+  - **Phase 7:** Semantic search (vector embeddings), GitHub MCP integration, enterprise research specialist.
+  - **Phase 8:** Parallel task forces, SSE streaming, run status endpoint.
+  - **Phase 9:** CLI streaming, corrective re-prompt, rate limiting.
+  - **Phase 10:** Hardware profiles, bootstrap, three-layer inference, feature flags.
+  - **Phase 11:** Browser tool (Playwright), ChromaDB vector store.
+  - **Phase 12:** Quality gates (Gates 1–3), `run_tests` tool, LLM orchestrator, session continuation.
+  - **Phase 13:** Rust thin launcher (static binary, self-update, `install.sh`).
+  - **Phase 14:** Pure-Rust tar extraction, Ed25519 signed updates, macOS targets, hot-path analysis.
+  - **Post-Phase-14:** Adaptive backend resolution, model selection fixes, dynamic pack composition, universal review mechanism (Gate 4).
 
 ---
 
@@ -402,5 +417,122 @@ all     = ["agentic-concierge[mcp,otel,embed,browser]"]  # nano excluded (platfo
 - [ ] `ruff check src/ tests/ --select E,W,F --ignore E501,F401,E741` passes clean
 - [ ] On mocked "first run" (no detected.json): bootstrap flow runs without error in tests
 
-**Phase 10 acceptance:** All 14 deliverables implemented; fast CI ~473 pass; `concierge doctor` works on the development machine; `concierge bootstrap --non-interactive` writes `detected.json`; feature flag gating verified (disabled feature = zero resource cost confirmed by test).
+**Phase 10 acceptance:** All 14 deliverables implemented; fast CI: **495 pass**; `concierge doctor` works on the development machine; `concierge bootstrap --non-interactive` writes `detected.json`; feature flag gating verified (disabled feature = zero resource cost confirmed by test).
+
+---
+
+## Phase 11: Browser tool and ChromaDB — **complete**
+
+**Goal:** Add a Playwright-based browser tool (feature-gated per profile) and a ChromaDB vector store backend for the run index. Both are optional features that consume zero resources when disabled.
+
+### Deliverables (Phase 11)
+
+| # | Deliverable | Status | Notes |
+|---|-------------|--------|-------|
+| 11.1 | `infrastructure/tools/browser_tool.py` | Done | `BrowserTool`, `is_available()`; 6 async tool methods (browse, click, fill, screenshot, extract_text, navigate); 30s timeout; URL validation |
+| 11.2 | `Feature.BROWSER` in `PROFILE_FEATURES` | Done | SMALL/MEDIUM/LARGE/SERVER enabled; NANO excluded |
+| 11.3 | `BaseSpecialistPack` browser integration | Done | `feature_set`, `workspace_path`, `network_allowed` params; `aopen()`/`aclose()` lifecycle; `_register_browser_tools()` |
+| 11.4 | Registry passes `FeatureSet` to packs | Done | `ConfigSpecialistRegistry.get_pack()` loads detected tier, builds FeatureSet |
+| 11.5 | `RunIndexConfig` additions for ChromaDB | Done | `provider`, `chromadb_path`, `chromadb_collection` fields |
+| 11.6 | `ChromaRunIndex` — ChromaDB vector store | Done | `infrastructure/workspace/run_index_chroma.py`; lazy import; `add()`/`search()` |
+| 11.7 | Dispatch in `run_index.py` | Done | ChromaDB dispatch when `provider="chromadb"` with JSONL fallback |
+| 11.8 | `concierge doctor` extras table | Done | Browser (playwright) and ChromaDB rows |
+| 11.9 | `MCPAugmentedPack` aopen/aclose fix | Done | Now calls `inner.aopen()`/`inner.aclose()` so browser tools work when MCP-wrapped |
+| 11.10 | Tests | Done | `test_browser_tool.py` (13), `test_run_index_chroma.py` (10), +4 test_config, +4 test_features, +2 test_doctor_cli; total **531 pass** |
+
+**Phase 11 acceptance:** All 10 deliverables implemented; fast CI: **531 pass** (+36 vs Phase 10).
+
+---
+
+## Phase 12: Quality gates, orchestrator, session continuation — **complete**
+
+**Goal:** Add engineering quality gates (run_tests tool, tests_verified validation), replace naive recruitment with an LLM orchestrator that decomposes tasks and assigns specialists with briefs, and add session continuation (checkpoint + resume) for interrupted runs.
+
+**See also:** ARCHITECTURE.md §8 for detailed technical design.
+
+### Deliverables (Phase 12)
+
+| # | Deliverable | Status | Notes |
+|---|-------------|--------|-------|
+| 12.1 | `infrastructure/tools/test_runner.py` | Done | `run_tests()` — auto-detect pytest/cargo/npm/unittest; structured results |
+| 12.2 | `run_tests` tool in engineering pack | Done | Always present regardless of `network_allowed` |
+| 12.3 | `tests_verified` + `validate_finish_payload` quality gate | Done | Gates 1–3 in `_execute_pack_loop` |
+| 12.4 | Engineering system prompt quality gate instructions | Done | `SYSTEM_PROMPT_ENGINEERING` updated |
+| 12.5 | `application/orchestrator.py` | Done | `SpecialistBrief`, `OrchestrationPlan`; `orchestrate_task()` with `create_plan` tool |
+| 12.6 | Brief injection in `execute_task.py` | Done | `_get_brief()` helper; brief appended to user message |
+| 12.7 | Result synthesis step | Done | `_synthesise_results()` async function |
+| 12.8 | `orchestration_plan` runlog event | Done | Emitted when `routing_method="orchestrator"` |
+| 12.9 | Orchestrator wired into `execute_task.py` | Done | Replaces `llm_recruit_specialist` call; `plan.mode` overrides `task_force_mode` |
+| 12.10 | `concierge plan` CLI command | Done | Calls `orchestrate_task`, prints Rich panel |
+| 12.11 | `infrastructure/workspace/run_checkpoint.py` | Done | `RunCheckpoint`; atomic save/load/delete; `find_resumable_runs()` |
+| 12.12 | Checkpoint write/delete in `execute_task.py` | Done | `_create_initial_checkpoint()`, `_update_checkpoint()`, `_delete_run_checkpoint()` |
+| 12.13 | `concierge resume` + `(resumable)` in `logs list` | Done | `resume_cmd` CLI command; resumable marker |
+| 12.14 | Tests | Done | 68 new tests across 6 files; total **599 pass** |
+
+**Phase 12 acceptance:** All 14 deliverables implemented; fast CI: **599 pass** (+68 vs Phase 11).
+
+---
+
+## Phase 13: Rust thin launcher — **complete**
+
+**Goal:** Add a static ~5 MB Rust binary that bootstraps the Python environment, manages self-update, and exec-replaces itself with the Python `concierge` binary. No Python or pip required for end users to get started.
+
+**See also:** ADR-016 (Rust launcher), ARCHITECTURE.md §9.
+
+### Deliverables (Phase 13)
+
+| # | Deliverable | Status | Notes |
+|---|-------------|--------|-------|
+| 13.1 | `launcher/Cargo.toml` | Done | reqwest/serde/dirs/semver/anyhow/thiserror; musl-compatible |
+| 13.2 | `launcher/src/config.rs` | Done | `LauncherConfig`; env overrides; 5 tests |
+| 13.3 | `launcher/src/exec.rs` | Done | `exec_python_concierge()` via `execv`; 1 test |
+| 13.4 | `launcher/src/setup.rs` | Done | `ensure_environment`, `upgrade_package`, `installed_version`; 3 tests |
+| 13.5 | `launcher/src/update.rs` | Done | `check_latest_release`, `apply_update`, `is_newer`; 4 tests |
+| 13.6 | `launcher/src/main.rs` | Done | Orchestration only; `--self-update` flag; passive hint |
+| 13.7 | `.github/workflows/build-launcher.yml` | Done | CI: test + clippy + fmt; cross-compile x86_64/aarch64 musl |
+| 13.8 | `release.yml` + `install.sh` | Done | Launcher binaries attached to GitHub Release; POSIX one-liner installer |
+| 13.9 | Docs | Done | README, CHANGELOG, BACKLOG, STATE, ARCHITECTURE, DECISIONS |
+
+**Phase 13 acceptance:** All 9 deliverables implemented; Rust tests: **13 pass**; Python fast CI unchanged.
+
+---
+
+## Phase 14: Native Rust hot paths + macOS support — **complete**
+
+**Goal:** Replace system `tar` dependency with pure-Rust extraction, add Ed25519 signature verification for self-update, add macOS build targets, and audit application hot paths for potential Rust (PyO3) acceleration.
+
+**See also:** ADR-017 (Ed25519 signing), ARCHITECTURE.md §10.
+
+### Deliverables (Phase 14)
+
+| # | Deliverable | Status | Notes |
+|---|-------------|--------|-------|
+| 14.1 | `launcher/Cargo.toml` — add flate2, tar, ed25519-dalek | Done | All pure Rust; musl static linking unaffected |
+| 14.2 | `setup.rs` — pure-Rust tar extraction | Done | `extract_uv()` via flate2+tar; 2 new tests |
+| 14.3 | `update.rs` — Ed25519 signed verification | Done | `verify_binary_signature_with_key`; optional .sig (best-effort); 5 new tests |
+| 14.4 | `exec.rs` — `#[cfg(unix)]` annotation | Done | Comment documents Phase 15 Windows path |
+| 14.5 | `install.sh` — macOS platform dispatch | Done | OS+arch case-block; Darwin/arm64 → aarch64-apple-darwin |
+| 14.6 | `build-launcher.yml` — macOS matrix | Done | 4 targets; portable size gate |
+| 14.7 | `release.yml` — signing + macOS | Done | Sign binaries step (graceful if secret unset); all 4 targets |
+| 14.8 | Application hot-path audit | Done | I/O-bound; PyO3 deferred to Phase 16 |
+| 14.9 | Docs | Done | ADR-017; ARCHITECTURE §10; BACKLOG; STATE |
+| 14.10 | `Makefile` — `setup-rust-toolchain` target | Done | User-local rustup install; `lint-rust` |
+| 14.11 | `scripts/generate_signing_key.sh` | Done | One-time keygen helper; Ed25519 via openssl |
+
+**Phase 14 acceptance:** All 11 deliverables implemented; Rust tests: **20 pass** (+7); Python fast CI: **618 pass** (unchanged).
+
+---
+
+## Post-Phase-14: Dynamic packs, review mechanism, model fixes — **complete**
+
+After Phase 14, several cross-cutting improvements were made without forming a numbered phase:
+
+| Feature | Key changes | Test impact |
+|---------|-------------|-------------|
+| Adaptive backend resolution (ADR-018) | `BACKEND_PRIORITY[tier]` fallback chain in `llm_discovery.py` | +11 tests |
+| Model selection fixes (v0.3.13–v0.3.15) | Closest-distance sort, same-family pref, tool-incapable blocklist, routing model validation, timeout recovery | +13 tests |
+| Dynamic pack composition | Central `tool_catalog.py` (8 tools), `dynamic_pack.py` (templates + dynamic builder), composable `prompts.py`; deleted `engineering.py`, `research.py`, `enterprise_research.py`, `recruit.py`, `capabilities.py` | +3 new test files |
+| Universal work review (Gate 4, ADR-019) | `_review_specialist_work()` in `execute_task.py`; `PROMPT_REVIEWER`; approve/reject tools; fail-open | +8 tests in `test_review.py` |
+
+**Current state:** Fast CI: **656 pass**; Rust: **22 pass**.
 

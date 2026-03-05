@@ -198,6 +198,7 @@ async def test_resume_raises_on_missing_checkpoint(tmp_path):
             run_repository=MagicMock(),
             specialist_registry=MagicMock(),
             config=config,
+            max_review_iterations=0,
         )
 
 
@@ -219,6 +220,7 @@ async def test_resume_raises_when_already_complete(tmp_path):
             run_repository=MagicMock(),
             specialist_registry=MagicMock(),
             config=config,
+            max_review_iterations=0,
         )
 
 
@@ -251,6 +253,7 @@ async def test_resume_single_specialist_completes(tmp_path):
         specialist_registry=registry,
         config=config,
         max_steps=10,
+        max_review_iterations=0,
     )
 
     assert result.payload.get("action") == "final"
@@ -288,6 +291,7 @@ async def test_resume_skips_completed_specialist(tmp_path):
         specialist_registry=registry,
         config=config,
         max_steps=10,
+        max_review_iterations=0,
     )
 
     # registry.get_pack was called for research (and maybe engineering, but engineering is skipped)
@@ -321,6 +325,7 @@ async def test_resume_deletes_checkpoint_on_success(tmp_path):
         specialist_registry=registry,
         config=config,
         max_steps=10,
+        max_review_iterations=0,
     )
 
     assert not (Path(run_dir) / "checkpoint.json").exists()
@@ -351,6 +356,7 @@ async def test_resume_emits_run_complete_event(tmp_path):
         specialist_registry=registry,
         config=config,
         max_steps=10,
+        max_review_iterations=0,
     )
 
     # Check that run_complete event was appended

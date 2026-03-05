@@ -79,6 +79,29 @@ def _render_stream_event(console, event: dict) -> None:  # noqa: ARG001
     elif kind == "cloud_fallback":
         console.print(f"{prefix}[magenta]☁ cloud fallback[/magenta]: {data.get('reason','?')} → {data.get('cloud_model','?')}")
 
+    elif kind == "approval_requested":
+        console.print(
+            f"{prefix}[bold yellow]⏸ APPROVAL REQUESTED[/bold yellow]: "
+            f"{data.get('action','?')} — {data.get('reason','')}"
+        )
+
+    elif kind == "approval_granted":
+        console.print(f"{prefix}[green]✓ APPROVED[/green]: {data.get('comment','')}")
+
+    elif kind == "approval_denied":
+        console.print(f"{prefix}[red]✗ DENIED[/red]: {data.get('comment','')}")
+
+    elif kind == "delegation_start":
+        console.print(
+            f"{prefix}[cyan]↳ delegating to {data.get('sub_specialist','?')}[/cyan]: "
+            f"{data.get('sub_task','')[:80]}"
+        )
+
+    elif kind == "delegation_complete":
+        console.print(
+            f"{prefix}[cyan]↲ delegation to {data.get('sub_specialist','?')} complete[/cyan]"
+        )
+
     elif kind == "pack_start":
         console.print(f"{prefix}[bold cyan]◈ pack {data.get('specialist_id','?')} starting[/bold cyan]")
 
@@ -110,7 +133,7 @@ def _result_summary(result) -> str:
 
 async def _run_with_streaming(
     task, chat_client, run_repository, specialist_registry, config, resolved_model_cfg,
-    resolved_llm=None,
+    resolved_llm=None, approval_channel=None,
 ):
     """Run execute_task with an event_queue and render events to the terminal in real-time."""
     from rich.console import Console
@@ -128,6 +151,7 @@ async def _run_with_streaming(
             resolved_llm=resolved_llm,
             max_steps=40,
             event_queue=event_queue,
+            approval_channel=approval_channel,
         )
     )
 
@@ -152,6 +176,7 @@ def run(
     network_allowed: bool = typer.Option(True, help="Allow network tools (web_search, fetch_url)."),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose (DEBUG) logging to stderr."),
     stream: bool = typer.Option(False, "--stream", "-s", help="Stream events as they happen."),
+    auto_approve: bool = typer.Option(False, "--auto-approve", help="Auto-approve all approval requests (skip interactive prompts)."),
 ) -> None:
     """Run a task end-to-end and print result + run directory."""
     logging.basicConfig(
@@ -176,12 +201,23 @@ def run(
     specialist_registry = ConfigSpecialistRegistry(config)
     task = build_task(prompt, pack, model_key, network_allowed)
 
+    # Approval channel: interactive CLI prompt unless --auto-approve is set.
+    if auto_approve:
+        from agentic_concierge.infrastructure.approval import AutoApprovalChannel
+        approval_channel = AutoApprovalChannel()
+    else:
+        from agentic_concierge.infrastructure.approval import CliApprovalChannel
+        approval_channel = CliApprovalChannel(
+            timeout_s=getattr(config, "approval_timeout_s", 600.0),
+        )
+
     try:
         if stream:
             result = asyncio.run(
                 _run_with_streaming(
                     task, chat_client, run_repository, specialist_registry,
                     config, resolved.model_config, resolved_llm=resolved,
+                    approval_channel=approval_channel,
                 )
             )
         else:
@@ -196,6 +232,7 @@ def run(
                     resolved_model_cfg=resolved.model_config,
                     resolved_llm=resolved,
                     max_steps=40,
+                    approval_channel=approval_channel,
                 )
             )
     except httpx.ConnectError as e:
@@ -579,6 +616,7 @@ def resume_cmd(
                 specialist_registry=specialist_registry,
                 config=config,
                 resolved_model_cfg=resolved.model_config,
+                resolved_llm=resolved,
                 max_steps=40,
             )
         )

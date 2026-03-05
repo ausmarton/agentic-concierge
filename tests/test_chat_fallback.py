@@ -375,7 +375,7 @@ async def test_execute_task_logs_cloud_fallback_event_in_runlog(tmp_path):
             events_logged.append({"kind": kind, "payload": payload, "step": step})
 
     class _Registry:
-        def get_pack(self, sid, ws, net): return _Pack()
+        def get_pack(self, sid, ws, net, **kw): return _Pack()
 
     task = Task(prompt="do something", specialist_id="engineering")
     await execute_task(
@@ -384,6 +384,7 @@ async def test_execute_task_logs_cloud_fallback_event_in_runlog(tmp_path):
         run_repository=_Repo(),
         specialist_registry=_Registry(),
         config=config,
+        max_review_iterations=0,
     )
 
     fallback_events = [e for e in events_logged if e["kind"] == "cloud_fallback"]
@@ -479,7 +480,7 @@ async def test_execute_task_auto_wraps_when_cloud_fallback_configured(tmp_path):
             events_logged.append({"kind": kind, "payload": payload})
 
     class _Registry:
-        def get_pack(self, sid, ws, net): return _Pack()
+        def get_pack(self, sid, ws, net, **kw): return _Pack()
 
     task = Task(prompt="do something", specialist_id="engineering")
 
@@ -493,6 +494,7 @@ async def test_execute_task_auto_wraps_when_cloud_fallback_configured(tmp_path):
             run_repository=_Repo(),
             specialist_registry=_Registry(),
             config=config,
+            max_review_iterations=0,
         )
 
     # With policy="always", every LLM call goes to cloud.

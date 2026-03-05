@@ -281,6 +281,38 @@ def pick_smaller_model(available_models: list[str], current_model: str) -> str |
     return smaller[0][0]
 
 
+def pick_larger_model(available_models: list[str], current_model: str) -> str | None:
+    """Return the smallest model larger than *current_model*, or None.
+
+    This is the upward counterpart to ``pick_smaller_model()``: used for
+    adaptive escalation when a small model produces low-quality output.
+    Same-family models are preferred; falls back to any available model.
+
+    ``available_models`` is expected to be pre-filtered for tool capability
+    (as populated by ``resolve_llm()``).
+    """
+    current_size = _param_size_sort_key(current_model, None)[0]
+    if current_size >= 999.0:
+        return None  # cannot escalate from an unparseable model
+    current_family = _model_family(current_model)
+    larger = [
+        (n, s)
+        for n in available_models
+        if n != current_model
+        for s in (_param_size_sort_key(n, None)[0],)
+        if current_size < s < 999.0
+    ]
+    if not larger:
+        return None
+    # Prefer same-family, then smallest first (closest upgrade)
+    same_family = [(n, s) for n, s in larger if _model_family(n) == current_family]
+    if same_family:
+        same_family.sort(key=lambda t: t[1])  # smallest first
+        return same_family[0][0]
+    larger.sort(key=lambda t: t[1])  # smallest first
+    return larger[0][0]
+
+
 def _ollama_pull(model: str, ollama_root: str, timeout_s: int = 600) -> bool:
     """Run ollama pull <model>. Assumes ollama CLI is on PATH. Returns True if pull succeeded."""
     try:

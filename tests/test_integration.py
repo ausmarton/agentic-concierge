@@ -85,6 +85,7 @@ async def test_execute_task_creates_run_dir_runlog_workspace(temp_workspace_root
             specialist_registry=specialist_registry,
             config=config,
             max_steps=40,
+            max_review_iterations=0,
         )
 
     assert result.specialist_id == "engineering"
@@ -126,6 +127,7 @@ async def test_execute_task_research_pack(temp_workspace_root):
             specialist_registry=specialist_registry,
             config=config,
             max_steps=40,
+            max_review_iterations=0,
         )
 
     assert result.specialist_id == "research"
@@ -257,6 +259,7 @@ async def test_e2e_real_http_engineering_run(temp_workspace_root):
         specialist_registry=specialist_registry,
         config=config,
         max_steps=40,
+        max_review_iterations=0,
     )
 
     assert result.specialist_id == "engineering"
@@ -312,6 +315,7 @@ async def test_execute_task_engineering_real_llm(temp_workspace_root):
             config=cfg,
             resolved_model_cfg=model_cfg,
             max_steps=40,
+            max_review_iterations=0,
         )
     except Exception as e:
         err = str(e).lower()
@@ -359,6 +363,7 @@ async def test_execute_task_research_pack_real_llm(temp_workspace_root):
             config=cfg,
             resolved_model_cfg=model_cfg,
             max_steps=40,
+            max_review_iterations=0,
         )
     except Exception as e:
         err = str(e).lower()

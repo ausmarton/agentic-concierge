@@ -132,6 +132,7 @@ async def _run_with_captured_models(
             specialist_registry=specialist_registry,
             config=config,
             max_steps=10,
+            max_review_iterations=0,
         )
 
     return result, captured_models

@@ -26,7 +26,20 @@ from agentic_concierge.infrastructure.telemetry import setup_telemetry
 from agentic_concierge.infrastructure.workspace import FileSystemRunRepository
 from agentic_concierge.infrastructure.specialists import ConfigSpecialistRegistry
 
+from agentic_concierge.infrastructure.approval import HttpApprovalChannel
+from agentic_concierge.application.approval import ApprovalDecision
+
 logger = logging.getLogger(__name__)
+
+# Active approval channels keyed by run_id.  Cleaned up via TTL.
+_active_channels: dict[str, HttpApprovalChannel] = {}
+
+
+def _cleanup_stale_channels() -> None:
+    """Remove channels that have exceeded their TTL."""
+    stale = [rid for rid, ch in _active_channels.items() if ch.is_stale]
+    for rid in stale:
+        _active_channels.pop(rid, None)
 
 
 @asynccontextmanager
@@ -34,6 +47,7 @@ async def _lifespan(app: FastAPI):  # noqa: ARG001
     config = load_config()
     setup_telemetry(config)
     yield
+    _active_channels.clear()
 
 
 app = FastAPI(title="agentic-concierge", lifespan=_lifespan)
@@ -214,6 +228,7 @@ async def run(req: RunRequest):
 async def _sse_event_generator(
     req: RunRequest,
     event_queue: asyncio.Queue,
+    approval_channel: Optional[HttpApprovalChannel] = None,
 ) -> AsyncIterator[str]:
     """Yield Server-Sent Events from the queue until the run-done sentinel."""
     while True:
@@ -226,10 +241,20 @@ async def _sse_event_generator(
             yield ": keep-alive timeout\n\n"
             break
 
+        # Register channel with run_id on first event that has it.
+        if approval_channel is not None:
+            run_id = (event.get("data") or {}).get("run_id")
+            if run_id and run_id not in _active_channels:
+                _active_channels[run_id] = approval_channel
+
         payload = json.dumps(event, ensure_ascii=False)
         yield f"data: {payload}\n\n"
 
         if event.get("kind") in ("_run_done_", "_run_error_"):
+            # Cleanup channel for this run.
+            run_id = (event.get("data") or {}).get("run_id")
+            if run_id:
+                _active_channels.pop(run_id, None)
             break
 
 
@@ -266,9 +291,17 @@ async def run_stream(req: RunRequest):
     # Bounded queue — prevents unbounded memory accumulation if the client reads slowly.
     event_queue: asyncio.Queue = asyncio.Queue(maxsize=256)
 
+    # Create HTTP approval channel for this streaming run.
+    _cleanup_stale_channels()
+    approval_channel = HttpApprovalChannel(
+        timeout_s=getattr(config, "approval_timeout_s", 600.0),
+    )
+
     async def _run_task_background() -> None:
+        # Register channel once we know the run_id (after execute_task creates it).
+        # We pre-register with a placeholder and update in the SSE generator.
         try:
-            await execute_task(
+            result = await execute_task(
                 task,
                 chat_client=chat_client,
                 run_repository=run_repository,
@@ -278,7 +311,10 @@ async def run_stream(req: RunRequest):
                 resolved_llm=resolved,
                 max_steps=40,
                 event_queue=event_queue,
+                approval_channel=approval_channel,
             )
+            # Register channel with actual run_id for /approve endpoint lookup.
+            _active_channels[result.run_id.value] = approval_channel
         except Exception as exc:  # noqa: BLE001
             # Put an error sentinel so the SSE generator terminates cleanly.
             try:
@@ -293,7 +329,7 @@ async def run_stream(req: RunRequest):
     asyncio.create_task(_run_task_background())
 
     return StreamingResponse(
-        _sse_event_generator(req, event_queue),
+        _sse_event_generator(req, event_queue, approval_channel=approval_channel),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -345,3 +381,36 @@ async def run_status(run_id: str):
             }
 
     return {"status": "running", "run_id": run_id}
+
+
+# ---------------------------------------------------------------------------
+# ADR-021: Human approval endpoint
+# ---------------------------------------------------------------------------
+
+class ApproveRequest(BaseModel):
+    request_id: str
+    approved: bool
+    comment: str = ""
+
+
+@app.post("/runs/{run_id}/approve")
+async def approve(run_id: str, req: ApproveRequest):
+    """Resolve a pending approval request for a streaming run.
+
+    Returns 200 on success, 404 if no pending approval is found for this
+    run_id and request_id combination.
+    """
+    channel = _active_channels.get(run_id)
+    if channel is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No active approval channel for run {run_id!r}",
+        )
+    decision = ApprovalDecision(approved=req.approved, comment=req.comment)
+    found = channel.resolve(req.request_id, decision)
+    if not found:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No pending approval with request_id={req.request_id!r}",
+        )
+    return {"ok": True, "approved": req.approved}

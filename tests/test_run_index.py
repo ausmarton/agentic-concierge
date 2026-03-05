@@ -233,7 +233,7 @@ async def test_execute_task_appends_to_index(tmp_path):
         def append_event(self, *a, **kw): pass
 
     class _Registry:
-        def get_pack(self, sid, ws, net): return _Pack()
+        def get_pack(self, sid, ws, net, **kw): return _Pack()
 
     task = Task(prompt="list files in workspace", specialist_id="engineering")
     await execute_task(
@@ -242,6 +242,7 @@ async def test_execute_task_appends_to_index(tmp_path):
         run_repository=_Repo(),
         specialist_registry=_Registry(),
         config=config,
+        max_review_iterations=0,
     )
 
     index = tmp_path / "run_index.jsonl"

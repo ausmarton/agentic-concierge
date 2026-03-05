@@ -1,11 +1,11 @@
 """LLM Orchestrator: decomposes tasks, assigns specialists, plans execution.
 
-Phase 12-5 to 12-9: replaces the naive ``llm_recruit_specialist`` call with a
-richer orchestration step that produces per-specialist briefs, selects the
-execution mode (sequential vs parallel), and flags whether synthesis is
-required after all specialists complete.
+The orchestrator can assign predefined specialist templates (engineering,
+research, enterprise_research) or compose dynamic packs by selecting tools
+and describing roles.  When the LLM selects specialist_id="dynamic", it must
+also provide a ``tools`` list and ``role`` description.
 
-Falls back to ``llm_recruit_specialist`` on any error — zero regression.
+Falls back to the first available template on any error — zero regression.
 """
 
 from __future__ import annotations
@@ -28,6 +28,8 @@ class SpecialistBrief:
 
     specialist_id: str
     brief: str  # targeted instructions / sub-task for this specialist
+    tools: Optional[List[str]] = None  # tool names for dynamic packs
+    role: Optional[str] = None  # role description for dynamic packs
 
 
 @dataclass
@@ -46,7 +48,7 @@ class OrchestrationPlan:
     mode: str  # "sequential" | "parallel"
     synthesis_required: bool
     reasoning: str
-    routing_method: str  # "orchestrator" | fallback routing_method values
+    routing_method: str  # "orchestrator" | "template_fallback"
     required_capabilities: List[str] = field(default_factory=list)
 
 
@@ -71,11 +73,30 @@ def _build_orchestrator_tool_def() -> Dict[str, Any]:
                             "properties": {
                                 "specialist_id": {
                                     "type": "string",
-                                    "description": "Specialist ID (e.g. 'engineering', 'research').",
+                                    "description": (
+                                        "Specialist ID: one of the available templates "
+                                        "(e.g. 'engineering', 'research', 'enterprise_research') "
+                                        "or 'dynamic' for a custom tool composition."
+                                    ),
                                 },
                                 "brief": {
                                     "type": "string",
                                     "description": "Specific sub-task instructions for this specialist.",
+                                },
+                                "tools": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": (
+                                        "Tool names to include when specialist_id='dynamic'. "
+                                        "Ignored for template specialists."
+                                    ),
+                                },
+                                "role": {
+                                    "type": "string",
+                                    "description": (
+                                        "Role description when specialist_id='dynamic'. "
+                                        "Ignored for template specialists."
+                                    ),
                                 },
                             },
                             "required": ["specialist_id", "brief"],
@@ -106,15 +127,31 @@ def _build_orchestrator_tool_def() -> Dict[str, Any]:
 
 def _build_orchestrator_messages(prompt: str, config: ConciergeConfig) -> List[Dict[str, Any]]:
     """Build the system + user messages for the orchestrator LLM call."""
+    from agentic_concierge.infrastructure.specialists.tool_catalog import tool_catalog_summary
+    from agentic_concierge.infrastructure.specialists.dynamic_pack import PACK_TEMPLATES
+
     specialist_lines = "\n".join(
-        f"- {name} ({', '.join(spec.capabilities or [])}): {spec.description}"
+        f"- {name}: {spec.description}"
         for name, spec in config.specialists.items()
     )
+
+    template_lines = "\n".join(
+        f"- {tid}: tools=[{', '.join(tpl.tool_names)}]"
+        for tid, tpl in PACK_TEMPLATES.items()
+    )
+
+    tools_summary = tool_catalog_summary()
+
     system = (
         "You are a task orchestrator. Decompose the given task into clear sub-task assignments "
-        "for the available specialist agents.\n\n"
-        f"Available specialists:\n{specialist_lines}\n\n"
+        "for specialist agents.\n\n"
+        f"Available specialist templates:\n{template_lines}\n\n"
+        f"Available specialists in config:\n{specialist_lines}\n\n"
+        f"Available tools (for dynamic packs):\n{tools_summary}\n\n"
         "Guidelines:\n"
+        "- For tasks that fit a template, use the template specialist_id.\n"
+        "- For tasks that need a mix of tools not covered by any template, use "
+        "specialist_id='dynamic' with a tools list and role description.\n"
         "- Assign each specialist a specific, actionable brief.\n"
         "- Use 'sequential' mode when later specialists need earlier specialists' outputs.\n"
         "- Use 'parallel' mode when tasks are independent and can run concurrently.\n"
@@ -151,9 +188,9 @@ async def orchestrate_task(
 ) -> OrchestrationPlan:
     """Decompose a task, assign specialists, and plan execution mode.
 
-    Makes one LLM call with the ``create_plan`` tool.  Falls back to
-    ``llm_recruit_specialist`` on any error or when the LLM returns no
-    usable tool call — zero regression with Phase 5 routing.
+    Makes one LLM call with the ``create_plan`` tool.  Falls back to the
+    first available template on any error or when the LLM returns no
+    usable tool call — zero regression.
 
     Args:
         prompt: The task prompt to decompose.
@@ -163,7 +200,7 @@ async def orchestrate_task(
 
     Returns:
         ``OrchestrationPlan`` with routing_method ``"orchestrator"`` on success,
-        or a plan built from the fallback ``llm_recruit_specialist`` result.
+        or a plan built from the template fallback result.
     """
     from agentic_concierge.infrastructure.telemetry import get_tracer
 
@@ -183,38 +220,51 @@ async def orchestrate_task(
             )
             span.set_attribute("tool_call_returned", bool(response.tool_calls))
     except Exception as exc:
-        logger.warning("Orchestrator LLM call failed (%s); falling back to llm_recruit_specialist", exc)
-        return await _fallback_plan(prompt, config, chat_client=chat_client, model=model)
+        logger.warning("Orchestrator LLM call failed (%s); falling back to template", exc)
+        return _template_fallback_plan(prompt, config)
 
     # Parse the create_plan tool call
     if not response.tool_calls:
-        logger.info("Orchestrator returned no tool call; falling back to llm_recruit_specialist")
-        return await _fallback_plan(prompt, config, chat_client=chat_client, model=model)
+        logger.info("Orchestrator returned no tool call; falling back to template")
+        return _template_fallback_plan(prompt, config)
 
     tc = response.tool_calls[0]
     if tc.tool_name != "create_plan":
         logger.info("Orchestrator called unexpected tool %r; falling back", tc.tool_name)
-        return await _fallback_plan(prompt, config, chat_client=chat_client, model=model)
+        return _template_fallback_plan(prompt, config)
 
     raw_assignments = tc.arguments.get("assignments", [])
     mode = tc.arguments.get("mode", "sequential")
     synthesis_required = tc.arguments.get("synthesis_required", False)
     reasoning = tc.arguments.get("reasoning", "")
 
-    # Filter to known specialist IDs only
+    # Validate assignments: known template IDs or "dynamic" with tools
     known_ids = set(config.specialists.keys())
+    from agentic_concierge.infrastructure.specialists.dynamic_pack import PACK_TEMPLATES
+    known_templates = set(PACK_TEMPLATES.keys())
+
     assignments: List[SpecialistBrief] = []
     for a in raw_assignments:
         sid = a.get("specialist_id", "")
         brief = a.get("brief", "")
-        if sid in known_ids:
+        tools = a.get("tools")
+        role = a.get("role")
+
+        if sid == "dynamic" and tools:
+            assignments.append(SpecialistBrief(
+                specialist_id="dynamic",
+                brief=brief,
+                tools=tools,
+                role=role,
+            ))
+        elif sid in known_ids or sid in known_templates:
             assignments.append(SpecialistBrief(specialist_id=sid, brief=brief))
         else:
             logger.warning("Orchestrator assigned unknown specialist %r; skipping", sid)
 
     if not assignments:
         logger.info("Orchestrator produced no valid assignments; falling back")
-        return await _fallback_plan(prompt, config, chat_client=chat_client, model=model)
+        return _template_fallback_plan(prompt, config)
 
     specialist_ids = [a.specialist_id for a in assignments]
     required_capabilities = _derive_required_capabilities(specialist_ids, config)
@@ -237,28 +287,34 @@ async def orchestrate_task(
     )
 
 
-async def _fallback_plan(
+def _template_fallback_plan(
     prompt: str,
     config: ConciergeConfig,
-    *,
-    chat_client: "ChatClient",
-    model: str,
 ) -> OrchestrationPlan:
-    """Fall back to llm_recruit_specialist and wrap the result as an OrchestrationPlan."""
-    from agentic_concierge.application.recruit import llm_recruit_specialist
+    """Fall back to the first available template specialist."""
+    from agentic_concierge.infrastructure.specialists.dynamic_pack import PACK_TEMPLATES
 
-    recruitment = await llm_recruit_specialist(
-        prompt, config, chat_client=chat_client, model=model
-    )
-    assignments = [
-        SpecialistBrief(specialist_id=sid, brief="")
-        for sid in recruitment.specialist_ids
-    ]
+    # Use first template that exists in config
+    for tid in PACK_TEMPLATES:
+        if tid in config.specialists:
+            logger.info("Template fallback: using %r", tid)
+            return OrchestrationPlan(
+                specialist_assignments=[SpecialistBrief(specialist_id=tid, brief="")],
+                mode="sequential",
+                synthesis_required=False,
+                reasoning="template_fallback",
+                routing_method="template_fallback",
+                required_capabilities=[],
+            )
+
+    # Last resort: first specialist in config
+    first_id = next(iter(config.specialists))
+    logger.info("Template fallback (last resort): using %r", first_id)
     return OrchestrationPlan(
-        specialist_assignments=assignments,
+        specialist_assignments=[SpecialistBrief(specialist_id=first_id, brief="")],
         mode="sequential",
-        synthesis_required=len(recruitment.specialist_ids) > 1,
-        reasoning="",
-        routing_method=recruitment.routing_method,
-        required_capabilities=recruitment.required_capabilities,
+        synthesis_required=False,
+        reasoning="template_fallback",
+        routing_method="template_fallback",
+        required_capabilities=[],
     )

@@ -1,7 +1,6 @@
-"""Tests for Phase 3 multi-pack task force: recruitment and sequential execution.
+"""Tests for multi-pack task force: sequential execution via orchestrator.
 
 These tests cover:
-- Greedy recruitment: mixed-capability prompts yield task forces.
 - execute_task with multiple specialists: both packs run, share workspace and runlog.
 - Context handoff: second pack receives first pack's finish payload in messages.
 - Runlog structure: pack_start events, step names prefixed with specialist ID.
@@ -16,9 +15,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from agentic_concierge.application.execute_task import execute_task
-from agentic_concierge.application.recruit import RecruitmentResult, recruit_specialist, _greedy_select_specialists
-from agentic_concierge.config import DEFAULT_CONFIG, ConciergeConfig, load_config
-from agentic_concierge.config.schema import SpecialistConfig, ModelConfig
+from agentic_concierge.config import load_config
 from agentic_concierge.domain import LLMResponse, Task, ToolCallRequest
 from agentic_concierge.infrastructure.ollama import OllamaChatClient
 from agentic_concierge.infrastructure.specialists import ConfigSpecialistRegistry
@@ -72,24 +69,8 @@ def _tool_resp(call_id: str = "t0") -> LLMResponse:
     )
 
 
-def _routing_response(caps: list[str] | None = None) -> LLMResponse:
-    """Mock LLM routing response for llm_recruit_specialist."""
-    return LLMResponse(
-        content=None,
-        tool_calls=[ToolCallRequest(
-            call_id="r0",
-            tool_name="select_capabilities",
-            arguments={"capabilities": caps or ["code_execution", "systematic_review"]},
-        )],
-    )
-
-
 def _create_plan_response(specialist_ids: list[str] | None = None, mode: str = "sequential") -> LLMResponse:
-    """Mock orchestrator create_plan response (Phase 12: orchestrate_task uses this).
-
-    Prepend this response to any mock sequence for a task where specialist_id=None,
-    because execute_task now calls orchestrate_task before the pack loop.
-    """
+    """Mock orchestrator create_plan response."""
     sids = specialist_ids or ["engineering", "research"]
     return LLMResponse(
         content=None,
@@ -112,124 +93,11 @@ def _read_runlog(run_dir: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Unit: greedy selection (no config required)
-# ---------------------------------------------------------------------------
-
-def _make_specialist(capabilities: list[str]) -> SpecialistConfig:
-    return SpecialistConfig(
-        description="test",
-        workflow="engineering",
-        capabilities=capabilities,
-    )
-
-
-def test_greedy_selects_single_pack_when_one_covers_all():
-    specialists = {
-        "eng": _make_specialist(["code_execution", "file_io"]),
-        "res": _make_specialist(["systematic_review", "web_search"]),
-    }
-    name_order = {"eng": 0, "res": 1}
-    selected = _greedy_select_specialists(["code_execution"], specialists, name_order)
-    assert selected == ["eng"]
-
-
-def test_greedy_selects_two_packs_for_non_overlapping_caps():
-    specialists = {
-        "eng": _make_specialist(["code_execution"]),
-        "res": _make_specialist(["systematic_review"]),
-    }
-    name_order = {"eng": 0, "res": 1}
-    selected = _greedy_select_specialists(
-        ["code_execution", "systematic_review"], specialists, name_order
-    )
-    assert set(selected) == {"eng", "res"}
-    assert selected == ["eng", "res"]   # config order
-
-
-def test_greedy_result_is_in_config_order_regardless_of_cap_order():
-    """Selected specialists are always sorted by config order, not greedy pick order."""
-    specialists = {
-        "eng": _make_specialist(["code_execution"]),
-        "res": _make_specialist(["systematic_review"]),
-    }
-    name_order = {"eng": 0, "res": 1}
-    # Caps in "res-first" order — result must still be ["eng", "res"]
-    selected = _greedy_select_specialists(
-        ["systematic_review", "code_execution"], specialists, name_order
-    )
-    assert selected == ["eng", "res"]
-
-
-def test_greedy_returns_empty_when_no_coverage():
-    specialists = {
-        "eng": _make_specialist(["code_execution"]),
-    }
-    name_order = {"eng": 0}
-    selected = _greedy_select_specialists(["systematic_review"], specialists, name_order)
-    assert selected == []
-
-
-def test_greedy_shared_capability_selects_one_pack():
-    """file_io is provided by both packs; only one should be selected."""
-    specialists = {
-        "eng": _make_specialist(["code_execution", "file_io"]),
-        "res": _make_specialist(["systematic_review", "file_io"]),
-    }
-    name_order = {"eng": 0, "res": 1}
-    selected = _greedy_select_specialists(["file_io"], specialists, name_order)
-    assert len(selected) == 1   # one pack is sufficient
-
-
-# ---------------------------------------------------------------------------
-# Unit: recruit_specialist task-force behaviour
-# ---------------------------------------------------------------------------
-
-def test_recruit_mixed_prompt_returns_task_force():
-    """Prompts needing engineering + research capabilities recruit both packs."""
-    result = recruit_specialist(
-        "build a tool that does a systematic review of arxiv papers",
-        DEFAULT_CONFIG,
-    )
-    assert result.is_task_force
-    assert "engineering" in result.specialist_ids
-    assert "research" in result.specialist_ids
-
-
-def test_recruit_single_cap_prompt_is_not_task_force():
-    result = recruit_specialist("build a Python service", DEFAULT_CONFIG)
-    assert not result.is_task_force
-    assert result.specialist_ids == ["engineering"]
-
-
-def test_recruit_specialist_id_property_returns_first():
-    result = recruit_specialist(
-        "build a tool that does a systematic review of arxiv papers",
-        DEFAULT_CONFIG,
-    )
-    assert result.specialist_id == result.specialist_ids[0]
-
-
-@pytest.mark.parametrize("prompt,expected_ids", [
-    # Single-pack prompts
-    ("build a Python service",             ["engineering"]),
-    ("systematic review of literature",    ["research"]),
-    # Multi-pack prompt
-    ("build a systematic review tool",     ["engineering", "research"]),
-])
-def test_specialist_ids_for_various_prompts(prompt, expected_ids):
-    result = recruit_specialist(prompt, DEFAULT_CONFIG)
-    for sid in expected_ids:
-        assert sid in result.specialist_ids
-    # Single-pack prompts must NOT be task forces.
-    if len(expected_ids) == 1:
-        assert not result.is_task_force
-
-
-# ---------------------------------------------------------------------------
 # Integration: execute_task with task force
 # ---------------------------------------------------------------------------
 
-async def _run_task_force(prompt: str, mock_responses: list, *, tmp_path) -> tuple:
+async def _run_task_force(prompt: str, mock_responses: list, *, tmp_path,
+                          max_review_iterations=0) -> tuple:
     """Run execute_task with the given prompt and mock LLM responses.
     Returns (result, events).
     """
@@ -248,6 +116,7 @@ async def _run_task_force(prompt: str, mock_responses: list, *, tmp_path) -> tup
             specialist_registry=specialist_registry,
             config=config,
             max_steps=10,
+            max_review_iterations=max_review_iterations,
         )
     events = _read_runlog(result.run_dir)
     return result, events
@@ -395,6 +264,7 @@ async def test_single_pack_run_is_not_a_task_force(tmp_path):
             specialist_registry=specialist_registry,
             config=config,
             max_steps=10,
+            max_review_iterations=0,
         )
 
     assert not result.is_task_force
@@ -421,6 +291,7 @@ async def test_single_pack_runlog_has_no_pack_start_events(tmp_path):
             specialist_registry=specialist_registry,
             config=config,
             max_steps=10,
+            max_review_iterations=0,
         )
 
     events = _read_runlog(result.run_dir)

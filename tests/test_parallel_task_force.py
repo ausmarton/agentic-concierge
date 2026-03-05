@@ -293,6 +293,7 @@ async def test_parallel_task_force_runs_both_packs():
             run_repository=run_repository,
             specialist_registry=registry,
             config=config,
+            max_review_iterations=0,
         )
 
     assert "pack_results" in result.payload
@@ -354,6 +355,7 @@ async def test_single_pack_parallel_mode_falls_to_sequential():
         run_repository=run_repository,
         specialist_registry=registry,
         config=config,
+        max_review_iterations=0,
     )
 
     # Single pack → no pack_results wrapper; just normal payload

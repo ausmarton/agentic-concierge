@@ -102,6 +102,9 @@ class SpecialistRegistry(Protocol):
         specialist_id: str,
         workspace_path: str,
         network_allowed: bool,
+        *,
+        tools: Optional[List[str]] = None,
+        role: Optional[str] = None,
     ) -> SpecialistPack: ...
 
     def list_ids(self) -> List[str]: ...

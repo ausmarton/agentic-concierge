@@ -1,5 +1,13 @@
 # agentic-concierge: Capability Model
 
+> **Note (2026-03-05):** This document describes the Phase 2 keyword-based capability routing
+> system which has been **superseded** by the LLM orchestrator (Phase 12) and dynamic pack
+> composition (post-Phase 14). The files it references (`config/capabilities.py`,
+> `application/recruit.py`, `tests/test_capabilities.py`) have been deleted. Capability IDs
+> still exist on `SpecialistConfig.capabilities` for metadata purposes, but routing is now
+> handled by `orchestrate_task()` in `application/orchestrator.py`. See ARCHITECTURE.md §8.4
+> for the current routing design.
+
 **Purpose:** Reference for all defined capability IDs, which packs provide them, and how to extend the model.
 
 ---

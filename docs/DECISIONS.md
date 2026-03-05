@@ -635,3 +635,281 @@ ADR-013's table that said "server drops Ollama".
   the inprocess backend viable as a fallback without manual model download.
 - 11 new tests cover fallback scenarios, feature gating, auto-start, comprehensive error
   messages, and `_try_backend` unit tests.
+
+---
+
+## ADR-019: Universal work review mechanism (Gate 4 on `finish_task`)
+
+**Status:** Accepted
+**Date:** 2026-03-05
+
+**Context:** The system has quality gates (required fields, `tests_verified`,
+`validate_finish_payload`) but no independent verification of a specialist's claims.
+A specialist can assert "tests pass" or "feature complete" without any second opinion.
+Human code review exists because developers are unreliable self-assessors; the same
+principle applies to LLM agents. We need a built-in review/critique phase that runs
+automatically for every specialist execution.
+
+**Decision:** After the doer calls `finish_task` and passes Gates 1–3 (prior tool call,
+required fields, quality gate), a new **Gate 4** triggers an independent reviewer LLM
+call. The reviewer inspects the workspace and finish payload using read-only tools, then
+either approves (`approve_work`) or rejects with actionable critique (`request_revision`).
+If rejected, the critique is returned to the doer as a `finish_task` error, and the doer
+loop continues.
+
+**Reviewer design:**
+- `_review_specialist_work()` is a lightweight async function (max 5 steps), not a full
+  `_execute_pack_loop`. It builds a reviewer system prompt + user message containing the
+  finish payload, gives the reviewer read-only tools from the doer's pack plus
+  `approve_work` / `request_revision`, and runs a simple tool-calling mini-loop.
+- **Fail-open:** Plain text from reviewer = implicit approval. Reviewer errors = implicit
+  approval. Max steps without a decision tool call = implicit approval. This prevents
+  reviewer failures from blocking work.
+- **Same model:** The reviewer uses the same `model_cfg` as the doer (no separate model
+  selection). This keeps things simple and avoids model-selection complexity.
+- **Safe tool set:** `_SAFE_REVIEWER_TOOLS = {"read_file", "list_files", "run_tests"}`.
+  Explicitly excluded: `shell`, `write_file`, `web_search`, `fetch_url`,
+  `cross_run_search`. The reviewer reads and verifies; it does not modify.
+
+**Max review iterations:** `_MAX_REVIEW_ITERATIONS = 2`. After 2 rejections, the work
+is accepted with a `_review_warning` annotation in the payload. This prevents infinite
+doer↔reviewer loops. Exposed as `max_review_iterations` parameter on `execute_task()`,
+`resume_execute_task()`, `_execute_pack_loop()`, and `_run_task_force_parallel()`.
+
+**Test strategy:** `execute_task()` gets `max_review_iterations: int = 2` (enabled by
+default). Test helpers (`_run()`, `_run_task_force()`, etc.) pass
+`max_review_iterations=0` so existing tests work unchanged. Dedicated review tests in
+`tests/test_review.py` pass `max_review_iterations=2` explicitly.
+
+**Runlog events:**
+- `review_start` — emitted when Gate 4 begins; payload includes `specialist_id` and
+  `review_iteration`.
+- `review_approved` — reviewer approves; payload includes `comment` and `review_iteration`.
+- `review_rejected` — reviewer rejects; payload includes `critique` and `review_iteration`.
+
+**Alternatives considered:**
+- Separate reviewer specialist pack: rejected as over-engineered. The reviewer is a
+  lightweight mini-loop, not a full pack with its own lifecycle. It reuses the doer's
+  pack for tool execution (`pack.execute_tool()` for read-only tools).
+- Reviewer uses a different (smaller/cheaper) model: deferred. Using the same model is
+  simpler and ensures the reviewer can understand the doer's work. A future ADR may
+  revisit this when adaptive model selection is implemented.
+- Review as a separate template/pack type: rejected. Review is inherent to how every
+  specialist execution works, not a specialist-specific concern.
+
+**Consequences:**
+- Every specialist execution now has an independent verification step (when enabled).
+- The reviewer tool definitions (`_APPROVE_WORK_TOOL_DEF`, `_REQUEST_REVISION_TOOL_DEF`)
+  and `_SAFE_REVIEWER_TOOLS` are defined in `execute_task.py` alongside the synthesis
+  tool, not in `tool_catalog.py` — they are execute-task-specific.
+- `PROMPT_REVIEWER` is a self-contained fragment in `prompts.py` (not assembled via
+  `generate_system_prompt()`), following the same pattern as the synthesis agent prompt.
+- 8 new tests in `tests/test_review.py`; 10+ existing test files updated to pass
+  `max_review_iterations=0`. Fast CI: 655 pass (+5).
+
+---
+
+### ADR-020: Adaptive Escalation — Dynamic Model Right-Sizing
+
+**Date:** 2026-03-05
+
+**Status:** Accepted
+
+**Context:** The system currently starts each specialist on the configured model and has
+only one direction of model switching: *downward* on timeout (`pick_smaller_model()` in
+`llm_discovery.py`). When a small model produces low-quality work — repeated plain-text
+responses, tool-call loops, quality gate failures, or review rejections — the loop either
+retries with the same model (wasting steps) or gives up. The BACKLOG spec describes a
+bidirectional convergence: quality issues → go bigger, timeouts → go smaller. Gate 4
+(ADR-019) now provides reliable quality signals; it's time to act on them.
+
+**Decision:** Implement adaptive escalation as a per-pack-loop concern. When quality
+failure signals accumulate, the loop swaps to a larger available model and continues the
+conversation (preserving message history). This is the upward counterpart to the existing
+timeout-based downward switching.
+
+**Escalation triggers (quality failure signals):**
+1. **Plain-text exhaustion** — After `_MAX_PLAIN_TEXT_RETRIES` (2) corrective re-prompts
+   fail to elicit tool calls, escalate instead of treating text as final payload.
+2. **Loop detection** — After `[SYSTEM] LOOP DETECTED` is injected and the loop persists
+   for one more iteration, escalate instead of continuing the stall.
+3. **Review rejection at max** — After `_MAX_REVIEW_ITERATIONS` (2) rejections, escalate
+   instead of accepting with `_review_warning`. If escalation succeeds, reset the review
+   iteration counter (the new model gets fresh review attempts).
+
+Each trigger escalates at most once per signal type per pack loop. This prevents cascading
+escalations from a single persistent problem.
+
+**Non-triggers (handled by existing mechanisms):**
+- Timeout → existing `pick_smaller_model()` downward switching (unchanged).
+- Gate 1/2 failures → corrective error messages to the LLM (unchanged).
+- Gate 3 failures → existing `validate_finish_payload()` error messages (unchanged).
+
+**Escalation mechanics:**
+- `pick_larger_model(available_models, current_model)` in `llm_discovery.py`: returns the
+  smallest model larger than the current one (same-family preference, matching the existing
+  `pick_smaller_model()` pattern). Returns `None` if no larger model is available.
+- On escalation: rebind `model_cfg` to a new `ModelConfig` and rebuild `chat_client` via
+  `_rebuild_chat_client()` which preserves `FallbackChatClient` wrapping if present.
+- **Continue message history** — do not reset. The larger model benefits from seeing the
+  conversation context including prior failures. This also preserves any partial work the
+  smaller model accomplished.
+- Emit `model_escalated` runlog event with payload: `{trigger, from_model, to_model,
+  escalation_count}`.
+
+**Escalation state:**
+- Lives per-pack loop (reset for each specialist in a task force).
+- `escalation_count: int` — total escalations in this loop (across all trigger types).
+- `escalated_triggers: set[str]` — which trigger types have already caused escalation
+  (each type fires at most once).
+- `_MAX_ESCALATIONS = 2` — hard cap on total escalations per pack loop, regardless of
+  trigger type. After this cap, fall through to existing behaviour (accept with warning,
+  treat text as payload, etc.).
+
+**Reviewer model:**
+- The reviewer always uses the same model as the doer (matching ADR-019). When the doer
+  model is escalated, the reviewer automatically gets the escalated model since they share
+  `model_cfg`.
+
+**Config:**
+- `_MAX_ESCALATIONS = 2` constant in `execute_task.py`. Exposed as `max_escalations`
+  parameter on `execute_task()`, `resume_execute_task()`, `_execute_pack_loop()`, and
+  `_run_task_force_parallel()` — same threading pattern as `max_review_iterations`.
+- `max_escalations=0` disables escalation entirely (for tests and opt-out).
+- Not yet exposed on `ConciergeConfig` (deferred until we need per-config tuning).
+
+**Test strategy:**
+- Existing tests are unaffected: escalation only fires when `available_models` is populated
+  AND a quality failure occurs; test mocks typically have no available_models.
+- Dedicated escalation tests in `tests/test_escalation.py`:
+  - Plain-text exhaustion triggers escalation to larger model.
+  - Loop detection triggers escalation after warning fails.
+  - Review rejection at max triggers escalation and resets review counter.
+  - Escalation cap (`_MAX_ESCALATIONS=2`) prevents runaway escalation.
+  - No larger model available → fall through to existing behaviour.
+  - Each trigger type fires at most once.
+  - `model_escalated` runlog event is emitted with correct payload.
+
+**Scope boundaries (explicitly excluded from this ADR):**
+- Actions 3 and 4 from the BACKLOG spec (re-recruit specialist, modify tool/role mix) are
+  deferred. They require orchestrator changes and are a separate concern. This ADR covers
+  only model-level escalation (BACKLOG actions 1 and 2).
+- Starting on the *smallest* model by default (the "start small" half of adaptive
+  escalation) is deferred. Currently the system starts on the configured model. A future
+  ADR may address automatic smallest-model-first selection.
+
+**Alternatives considered:**
+- Reset message history on escalation: rejected. Partial work and failure context help the
+  larger model understand what went wrong and what's already been attempted.
+- Escalation state shared across task force: rejected. Each specialist's quality issues are
+  independent. A research pack struggling doesn't mean the engineering pack needs a bigger
+  model.
+- Separate escalation policy config (per-signal thresholds, etc.): rejected as
+  over-engineered. A single `max_escalations` cap with per-trigger-type dedup is sufficient.
+  Can be refined later if needed.
+- Escalate on Gate 3 (quality gate) failures: deferred. Gate 3 failures are pack-specific
+  validation (e.g. `tests_verified=False`) and the corrective error message is usually
+  sufficient for the LLM to self-correct. If this proves insufficient in practice, Gate 3
+  can be added as a trigger in a future iteration.
+
+**Consequences:**
+- Every specialist execution can now converge on the right model size: timeouts push down,
+  quality issues push up.
+- `pick_larger_model()` is added to `llm_discovery.py` alongside `pick_smaller_model()`.
+- `_execute_pack_loop` gains escalation state tracking and three escalation insertion points.
+- New `model_escalated` runlog event for observability.
+- Tests must pass `max_escalations=0` to avoid escalation side effects (same pattern as
+  review).
+
+
+### ADR-021: Human Approval — Interactive Pause-and-Wait via `request_approval` Tool
+
+**Date:** 2026-03-05
+**Status:** Accepted
+
+**Context:**
+`require_human_approval_for` exists in config and `PROMPT_CORE_RULES` tells the LLM to
+include an approval note in `finish_task`, but this is prompt-only enforcement — the LLM
+can ignore it, and even when it complies the human must manually run the command after the
+task finishes. There is no mechanical pause-and-wait in the tool loop.
+
+**Decision:**
+Add a `request_approval` tool handled inline in `_execute_pack_loop` (like `finish_task`).
+When the LLM calls it, the loop blocks on an `ApprovalChannel` protocol until the human
+responds. The tool result tells the LLM whether the action was approved or denied.
+
+**Design:**
+- `ApprovalChannel` protocol in `application/approval.py` with dataclasses
+  `ApprovalRequest` and `ApprovalDecision`.
+- Three implementations: `AutoApprovalChannel` (always approves; for tests),
+  `CliApprovalChannel` (stdin via `asyncio.to_thread`), `HttpApprovalChannel`
+  (SSE event + REST callback + `asyncio.Event`).
+- `_REQUEST_APPROVAL_TOOL_DEF` constant in `execute_task.py`; appended to effective
+  tool defs when `approval_channel` is not `None`.
+- Timeout: fail-closed (deny). Default 600s, configurable via `approval_timeout_s`
+  on `ConciergeConfig`.
+- Runlog events: `approval_requested`, `approval_granted`, `approval_denied`.
+
+**Backward compatibility:**
+- `approval_channel` defaults to `None`. When `None`, the tool is not in definitions.
+- If the LLM somehow calls `request_approval` without a channel, it auto-approves.
+- All existing tests pass unchanged.
+
+**Alternatives considered:**
+- Intercept tool calls matching config's `require_human_approval_for` list: rejected.
+  Fragile pattern matching; LLM names vary; can't distinguish "deploy to staging" from
+  "deploy to prod".
+- Add approval as a `finish_task` field: rejected. Conflates completion with approval;
+  the LLM may need to request approval mid-task (not just at the end).
+
+**Consequences:**
+- The tool loop can now block on human input within a session.
+- CLI gains `--auto-approve` flag.
+- HTTP API gains `POST /runs/{run_id}/approve` endpoint.
+- `_execute_pack_loop` gains `approval_channel` parameter (threaded through all callers).
+
+
+### ADR-022: Agent-to-Agent Delegation via `delegate_to_specialist` Tool
+
+**Date:** 2026-03-05
+**Status:** Accepted
+
+**Context:**
+The orchestrator plans the full task force upfront. Once a specialist is running, it cannot
+recruit a sub-specialist. If an engineering agent needs research, it must attempt it with its
+own tools or punt to `finish_task` notes.
+
+**Decision:**
+Add a `delegate_to_specialist` tool handled inline in `_execute_pack_loop`. When the LLM
+calls it, the loop creates a sub-specialist via the registry and runs a nested
+`_execute_pack_loop()`. The sub-specialist's finish payload becomes the tool result.
+
+**Design:**
+- `_DELEGATE_TOOL_DEF` constant; appended to tool defs when `delegation_depth > 0`.
+- `delegation_depth` parameter on `_execute_pack_loop`; defaults to 0. At depth 0, the
+  tool is not included.
+- Sub-specialist gets `min(remaining_steps // 2, _MAX_DELEGATION_STEPS)` with floor of 3.
+- `_MAX_DELEGATION_DEPTH = 1`: sub-specialists cannot delegate further.
+- `_MAX_DELEGATION_STEPS = 15`: independent cap on sub-specialist steps.
+- Same workspace, same run ID, same chat client and model config.
+- Sub-specialist gets only the sub_task prompt (clean context).
+- Inherited settings: `max_review_iterations`, `approval_channel`; escalation state fresh.
+- Runlog events: `delegation_start`, `delegation_complete`.
+
+**Backward compatibility:**
+- `delegation_depth` defaults to 0; tool not included in defs; existing tests unchanged.
+- `specialist_registry` and `workspace_path` params default to `None` on
+  `_execute_pack_loop`; delegation is only attempted when both are provided.
+
+**Alternatives considered:**
+- Allow unlimited recursion: rejected. Stack overflow risk; step budget explosion;
+  hard to debug.
+- Delegation via orchestrator re-planning: rejected. Orchestrator is a task-level
+  concern; delegation is a tool-level concern within a running specialist.
+
+**Consequences:**
+- Specialists can now compose: an engineering agent can delegate research mid-task.
+- `_execute_pack_loop` gains `delegation_depth`, `specialist_registry`, `workspace_path`,
+  and `config` parameters.
+- Step key prefixing enables attribution in runlog (`s5.d1.s0`).
+- Max depth = 1 keeps the system predictable and debuggable.

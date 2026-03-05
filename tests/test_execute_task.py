@@ -49,7 +49,8 @@ def _read_runlog(run_dir: str) -> list[dict]:
     return [json.loads(ln) for ln in lines if ln]
 
 
-async def _run(chat_mock_responses, *, tmp_path, specialist_id="engineering", max_steps=10):
+async def _run(chat_mock_responses, *, tmp_path, specialist_id="engineering", max_steps=10,
+               max_review_iterations=0):
     """Execute a task with the given sequential mock LLM responses."""
     config = load_config()
     run_repository = FileSystemRunRepository(workspace_root=str(tmp_path))
@@ -65,6 +66,7 @@ async def _run(chat_mock_responses, *, tmp_path, specialist_id="engineering", ma
             specialist_registry=specialist_registry,
             config=config,
             max_steps=max_steps,
+            max_review_iterations=max_review_iterations,
         )
 
 
@@ -749,6 +751,7 @@ async def test_orchestrator_brief_injected_into_specialist_messages(tmp_path):
             specialist_registry=specialist_registry,
             config=config,
             max_steps=10,
+            max_review_iterations=0,
         )
 
     # The first chat call's user message should contain the brief
@@ -784,6 +787,7 @@ async def test_checkpoint_written_and_deleted_on_completion(tmp_path):
             specialist_registry=specialist_registry,
             config=config,
             max_steps=10,
+            max_review_iterations=0,
         )
 
     # After successful completion, checkpoint.json must NOT exist
@@ -820,6 +824,7 @@ async def test_quality_gate_rejects_false_tests_verified(tmp_path):
             specialist_registry=specialist_registry,
             config=config,
             max_steps=20,
+            max_review_iterations=0,
         )
 
     events = _read_runlog(result.run_dir)
@@ -870,6 +875,7 @@ async def test_synthesis_skipped_for_single_specialist(tmp_path):
             specialist_registry=specialist_registry,
             config=config,
             max_steps=10,
+            max_review_iterations=0,
         )
 
     # Only 2 chat calls (list_files + finish_task); no synthesis call (which would be call_count=3)
