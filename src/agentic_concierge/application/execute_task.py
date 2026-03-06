@@ -321,11 +321,29 @@ async def execute_task(
         if plan.recommended_model_key != task.model_key:
             tier_cfg = config.models.get(plan.recommended_model_key)
             if tier_cfg is not None:
-                from agentic_concierge.infrastructure.llm_discovery import select_model
-                tier_model = select_model(
-                    tier_cfg.model, available_models, is_ollama=(tier_cfg.backend == "ollama"),
-                )
-                if tier_model is not None:
+                # available_models is list[str] of tool-capable model names.
+                # Check if the preferred tier model (or a same-family variant) is available.
+                preferred = tier_cfg.model
+                if preferred in available_models:
+                    tier_model = preferred
+                else:
+                    # Find closest same-family model from available names.
+                    from agentic_concierge.infrastructure.llm_discovery import (
+                        _model_family, _param_size_sort_key,
+                    )
+                    import math
+                    pref_family = _model_family(preferred)
+                    pref_size = _param_size_sort_key(preferred, None)[0]
+                    same_family = [m for m in available_models if _model_family(m) == pref_family]
+                    if same_family and pref_size > 0:
+                        def _log_dist(name: str) -> float:
+                            sz = _param_size_sort_key(name, None)[0]
+                            return abs(math.log(sz / pref_size)) if sz > 0 else 999.0
+                        tier_model = min(same_family, key=lambda n: (_log_dist(n), _param_size_sort_key(n, None)[0]))
+                    else:
+                        tier_model = None
+
+                if tier_model is not None and tier_model != model_cfg.model:
                     old_model = model_cfg.model
                     model_cfg = tier_cfg.model_copy(update={"model": tier_model})
                     from agentic_concierge.infrastructure.chat import build_chat_client
