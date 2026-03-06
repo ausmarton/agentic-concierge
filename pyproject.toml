@@ -31,7 +31,7 @@ dependencies = [
   "jsonschema>=4.21",
   "tenacity>=8.2",
   "trafilatura>=1.7.0",
-  "duckduckgo-search>=6.1.0",
+  "ddgs>=7.0.0",
   "psutil>=5.9",
   "platformdirs>=4.0",
 ]

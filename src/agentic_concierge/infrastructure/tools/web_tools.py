@@ -9,14 +9,17 @@ import httpx
 import trafilatura
 
 try:
-    from duckduckgo_search import DDGS
+    from ddgs import DDGS
 except Exception:  # pragma: no cover
-    DDGS = None  # type: ignore
+    try:
+        from duckduckgo_search import DDGS
+    except Exception:
+        DDGS = None  # type: ignore
 
 
 def web_search(query: str, max_results: int = 8) -> Dict[str, Any]:
     if DDGS is None:
-        return {"query": query, "results": [], "warning": "duckduckgo-search not available"}
+        return {"query": query, "results": [], "warning": "ddgs not available"}
     results = []
     with DDGS() as ddgs:
         for r in ddgs.text(query, max_results=max_results):
