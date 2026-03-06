@@ -398,6 +398,7 @@ async def execute_task(
             "mode": plan.mode,
             "synthesis_required": plan.synthesis_required,
             "reasoning": plan.reasoning,
+            "model_tier": plan.recommended_model_key,
         }
         run_repository.append_event(run_id, "orchestration_plan", _orch_plan_ev, step=None)
         _emit(event_queue, "orchestration_plan", _orch_plan_ev)

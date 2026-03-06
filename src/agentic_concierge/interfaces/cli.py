@@ -102,8 +102,17 @@ def _render_stream_event(console, event: dict) -> None:  # noqa: ARG001
             f"{prefix}[cyan]↲ delegation to {data.get('sub_specialist','?')} complete[/cyan]"
         )
 
+    elif kind == "orchestration_plan":
+        assignments = data.get("assignments", [])
+        model_tier = data.get("model_tier", "")
+        tier_str = f" [dim]model_tier={model_tier}[/dim]" if model_tier else ""
+        specs = ", ".join(a.get("specialist_id", "?") for a in assignments)
+        console.print(f"{prefix}[cyan]◇ plan[/cyan] {specs}{tier_str}")
+
     elif kind == "pack_start":
-        console.print(f"{prefix}[bold cyan]◈ pack {data.get('specialist_id','?')} starting[/bold cyan]")
+        model = data.get("model", "")
+        model_str = f" [dim]({model})[/dim]" if model else ""
+        console.print(f"{prefix}[bold cyan]◈ pack {data.get('specialist_id','?')}{model_str} starting[/bold cyan]")
 
     elif kind == "run_complete":
         pass  # Final panel is printed after the loop
@@ -175,7 +184,7 @@ def run(
     model_key: str = typer.Option("quality", help="Which model profile to use (quality|fast)."),
     network_allowed: bool = typer.Option(True, help="Allow network tools (web_search, fetch_url)."),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose (DEBUG) logging to stderr."),
-    stream: bool = typer.Option(False, "--stream", "-s", help="Stream events as they happen."),
+    stream: bool = typer.Option(True, "--stream/--no-stream", "-s", help="Stream events as they happen (default: on)."),
     auto_approve: bool = typer.Option(False, "--auto-approve", help="Auto-approve all approval requests (skip interactive prompts)."),
 ) -> None:
     """Run a task end-to-end and print result + run directory."""
