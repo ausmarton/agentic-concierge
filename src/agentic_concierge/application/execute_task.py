@@ -1426,6 +1426,7 @@ async def _execute_pack_loop(
     payload: Dict[str, Any] = {}
     any_non_finish_tool_called = False
     consecutive_plain_text = 0
+    total_plain_text = 0
     # Repetition detection: sliding window of recent (tool_name, args) signatures.
     tool_call_history: List[str] = []
     # Gate 4: track how many times the reviewer has rejected.
@@ -1532,15 +1533,25 @@ async def _execute_pack_loop(
 
             if not response.has_tool_calls:
                 consecutive_plain_text += 1
+                total_plain_text += 1
                 if consecutive_plain_text <= _MAX_PLAIN_TEXT_RETRIES:
                     tool_names = [t["function"]["name"] for t in effective_tool_defs]
-                    correction = (
-                        "You must call one of the available tools to continue — "
-                        "do not respond with plain text.\n"
-                        f"Available tools: {', '.join(tool_names)}.\n"
-                        "If the task is fully complete, call finish_task. "
-                        "Otherwise, use a tool to make progress."
-                    )
+                    if any_non_finish_tool_called or total_plain_text >= 2:
+                        correction = (
+                            "You already have enough information. Do NOT call any more "
+                            "search or data-gathering tools. Call finish_task now with "
+                            "a summary of what you found.\n"
+                            "Do not respond with plain text — you MUST call the "
+                            "finish_task tool."
+                        )
+                    else:
+                        correction = (
+                            "You must call one of the available tools to continue — "
+                            "do not respond with plain text.\n"
+                            f"Available tools: {', '.join(tool_names)}.\n"
+                            "If the task is fully complete, call finish_task. "
+                            "Otherwise, use a tool to make progress."
+                        )
                     messages.append({"role": "assistant", "content": response.content or ""})
                     messages.append({"role": "user", "content": correction})
                     logger.warning(
@@ -1578,13 +1589,18 @@ async def _execute_pack_loop(
                     escalated_triggers.add("plain_text_exhaustion")
                     consecutive_plain_text = 0  # reset for the new model
                     messages.append({"role": "assistant", "content": response.content or ""})
-                    messages.append({"role": "user", "content": (
+                    _esc_correction = (
+                        "You already have enough information. Call finish_task now "
+                        "with a summary of what you found. Do not respond with "
+                        "plain text — you MUST call the finish_task tool."
+                    ) if any_non_finish_tool_called else (
                         "You must call one of the available tools to continue — "
                         "do not respond with plain text.\n"
                         f"Available tools: {', '.join(t['function']['name'] for t in effective_tool_defs)}.\n"
                         "If the task is fully complete, call finish_task. "
                         "Otherwise, use a tool to make progress."
-                    )})
+                    )
+                    messages.append({"role": "user", "content": _esc_correction})
                     continue
 
                 logger.warning(
