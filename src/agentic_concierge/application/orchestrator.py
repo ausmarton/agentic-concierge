@@ -50,6 +50,7 @@ class OrchestrationPlan:
     reasoning: str
     routing_method: str  # "orchestrator" | "template_fallback"
     required_capabilities: List[str] = field(default_factory=list)
+    recommended_model_key: str = "quality"  # "fast" or "quality"
 
 
 def _build_orchestrator_tool_def() -> Dict[str, Any]:
@@ -118,6 +119,16 @@ def _build_orchestrator_tool_def() -> Dict[str, Any]:
                         "type": "string",
                         "description": "One sentence explaining the orchestration decision.",
                     },
+                    "model_tier": {
+                        "type": "string",
+                        "enum": ["fast", "quality"],
+                        "description": (
+                            "Model tier for task execution. Use 'fast' for simple tasks "
+                            "(lookups, searches, single-step queries, summarisation). "
+                            "Use 'quality' for complex tasks (multi-step engineering, "
+                            "code generation, analysis requiring deep reasoning)."
+                        ),
+                    },
                 },
                 "required": ["assignments", "mode", "synthesis_required", "reasoning"],
             },
@@ -157,6 +168,9 @@ def _build_orchestrator_messages(prompt: str, config: ConciergeConfig) -> List[D
         "- Use 'parallel' mode when tasks are independent and can run concurrently.\n"
         "- Set synthesis_required=true when multiple specialists produce outputs that need combining.\n"
         "- For single-specialist tasks, assign only that specialist.\n"
+        "- Set model_tier='fast' for simple tasks (lookups, web searches, quick questions, "
+        "summarisation). Set model_tier='quality' only for complex multi-step tasks, "
+        "code generation, or deep analysis. Default to 'fast' when in doubt.\n"
         "Call create_plan with the complete assignment plan."
     )
     return [
@@ -237,6 +251,9 @@ async def orchestrate_task(
     mode = tc.arguments.get("mode", "sequential")
     synthesis_required = tc.arguments.get("synthesis_required", False)
     reasoning = tc.arguments.get("reasoning", "")
+    model_tier = tc.arguments.get("model_tier", "quality")
+    if model_tier not in ("fast", "quality"):
+        model_tier = "quality"
 
     # Validate assignments: known template IDs or "dynamic" with tools
     known_ids = set(config.specialists.keys())
@@ -274,8 +291,8 @@ async def orchestrate_task(
         synthesis_required = True
 
     logger.info(
-        "Orchestrator plan: specialists=%s mode=%s synthesis=%s reasoning=%r",
-        specialist_ids, mode, synthesis_required, reasoning,
+        "Orchestrator plan: specialists=%s mode=%s model_tier=%s synthesis=%s reasoning=%r",
+        specialist_ids, mode, model_tier, synthesis_required, reasoning,
     )
     return OrchestrationPlan(
         specialist_assignments=assignments,
@@ -284,6 +301,7 @@ async def orchestrate_task(
         reasoning=reasoning,
         routing_method="orchestrator",
         required_capabilities=required_capabilities,
+        recommended_model_key=model_tier,
     )
 
 
@@ -294,7 +312,8 @@ def _template_fallback_plan(
     """Fall back to the first available template specialist."""
     from agentic_concierge.infrastructure.specialists.dynamic_pack import PACK_TEMPLATES
 
-    # Use first template that exists in config
+    # Use first template that exists in config.
+    # Default to "fast" model — adaptive escalation will upgrade if needed.
     for tid in PACK_TEMPLATES:
         if tid in config.specialists:
             logger.info("Template fallback: using %r", tid)
@@ -305,6 +324,7 @@ def _template_fallback_plan(
                 reasoning="template_fallback",
                 routing_method="template_fallback",
                 required_capabilities=[],
+                recommended_model_key="fast",
             )
 
     # Last resort: first specialist in config
@@ -317,4 +337,5 @@ def _template_fallback_plan(
         reasoning="template_fallback",
         routing_method="template_fallback",
         required_capabilities=[],
+        recommended_model_key="fast",
     )

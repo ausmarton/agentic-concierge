@@ -313,6 +313,33 @@ async def execute_task(
         required_capabilities = plan.required_capabilities
         routing_method = plan.routing_method
 
+        # --- model tier selection (ADR-023) ---
+        # The orchestrator recommends "fast" or "quality".  When "fast" is
+        # recommended and we have a fast model config, resolve the best
+        # available model for that tier.  Adaptive escalation (ADR-020) will
+        # upgrade to a larger model if the fast one can't handle the task.
+        if plan.recommended_model_key != task.model_key:
+            tier_cfg = config.models.get(plan.recommended_model_key)
+            if tier_cfg is not None:
+                from agentic_concierge.infrastructure.llm_discovery import select_model
+                tier_model = select_model(
+                    tier_cfg.model, available_models, is_ollama=(tier_cfg.backend == "ollama"),
+                )
+                if tier_model is not None:
+                    old_model = model_cfg.model
+                    model_cfg = tier_cfg.model_copy(update={"model": tier_model})
+                    from agentic_concierge.infrastructure.chat import build_chat_client
+                    chat_client = build_chat_client(model_cfg)
+                    logger.info(
+                        "Model tier selection: orchestrator recommended %r → using %s (was %s)",
+                        plan.recommended_model_key, tier_model, old_model,
+                    )
+                else:
+                    logger.info(
+                        "Model tier %r recommended but no suitable model available; keeping %s",
+                        plan.recommended_model_key, model_cfg.model,
+                    )
+
     for sid in specialist_ids:
         if sid not in config.specialists:
             raise RecruitError(f"Unknown specialist: {sid!r}")
@@ -337,6 +364,8 @@ async def execute_task(
         "required_capabilities": required_capabilities,
         "routing_method": routing_method,
         "is_task_force": is_task_force,
+        "model": model_cfg.model,
+        "model_tier": plan.recommended_model_key if plan else task.model_key,
     }
     run_repository.append_event(run_id, "recruitment", _recruitment_event, step=None)
     _emit(event_queue, "recruitment", _recruitment_event)
