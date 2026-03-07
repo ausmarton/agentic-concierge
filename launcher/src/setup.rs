@@ -16,16 +16,37 @@ pub enum SetupError {
 }
 
 /// Ensure managed venv exists with agentic-concierge installed.
-/// Returns path to the venv's concierge binary.
+/// Returns path to the venv's concierge-py binary.
 ///
-/// Fast path: if `venv_dir/bin/concierge` already exists, install any
+/// Fast path: if `venv_dir/bin/concierge-py` already exists, install any
 /// new extras requested via `CONCIERGE_EXTRA` and return.
 /// First-time path: detect system Python >= 3.10 or download uv, create venv, pip install.
 pub fn ensure_environment(config: &LauncherConfig) -> anyhow::Result<PathBuf> {
-    let concierge_bin = config.venv_dir.join("bin").join("concierge");
+    let concierge_bin = config.venv_dir.join("bin").join("concierge-py");
     if concierge_bin.exists() {
         ensure_extras(config)?;
         return Ok(concierge_bin);
+    }
+
+    // Migration: venv exists with old entry point name "concierge" → upgrade in place.
+    let old_bin = config.venv_dir.join("bin").join("concierge");
+    let pip = config.venv_dir.join("bin").join("pip");
+    if old_bin.exists() && pip.exists() {
+        eprintln!("[concierge] migrating venv entry point...");
+        let package_spec = match &config.pypi_extra {
+            Some(extra) => format!("{}[{}]", config.package_name, extra),
+            None => config.package_name.clone(),
+        };
+        let output = std::process::Command::new(&pip)
+            .args(["install", "--upgrade", &package_spec])
+            .output();
+        if let Ok(out) = output {
+            if out.status.success() && concierge_bin.exists() {
+                ensure_extras(config)?;
+                return Ok(concierge_bin);
+            }
+        }
+        // If migration failed, fall through to full setup.
     }
 
     // First-time setup
@@ -333,7 +354,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = make_config(dir.path());
         std::fs::create_dir_all(config.venv_dir.join("bin")).unwrap();
-        let bin = config.venv_dir.join("bin").join("concierge");
+        let bin = config.venv_dir.join("bin").join("concierge-py");
         std::fs::write(&bin, "#!/bin/sh\necho fake").unwrap();
         let result = ensure_environment(&config).unwrap();
         assert_eq!(result, bin);

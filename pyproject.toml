@@ -54,7 +54,7 @@ browser = ["playwright>=1.40"]
 all = ["agentic-concierge[mcp,otel,embed,browser]"]
 
 [project.scripts]
-concierge = "agentic_concierge.interfaces.cli:app"
+concierge-py = "agentic_concierge.interfaces.cli:app"
 
 [project.urls]
 Homepage = "https://github.com/ausmarton/agentic-concierge"
