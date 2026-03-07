@@ -154,21 +154,27 @@ def _build_orchestrator_messages(prompt: str, config: ConciergeConfig) -> List[D
     tools_summary = tool_catalog_summary()
 
     system = (
-        "You are a task orchestrator. Decompose the given task into clear sub-task assignments "
-        "for specialist agents.\n\n"
+        "You are a task orchestrator. Assign the given task to specialist agents.\n\n"
         f"Available specialist templates:\n{template_lines}\n\n"
         f"Available specialists in config:\n{specialist_lines}\n\n"
         f"Available tools (for dynamic packs):\n{tools_summary}\n\n"
-        "Guidelines:\n"
-        "- For tasks that fit a template, use the template specialist_id.\n"
-        "- For tasks that need a mix of tools not covered by any template, use "
-        "specialist_id='dynamic' with a tools list and role description.\n"
-        "- Assign each specialist a specific, actionable brief.\n"
-        "- Use 'sequential' mode when later specialists need earlier specialists' outputs.\n"
-        "- Use 'parallel' mode when tasks are independent and can run concurrently.\n"
-        "- Set synthesis_required=true when multiple specialists produce outputs that need combining.\n"
-        "- For single-specialist tasks, assign only that specialist.\n"
-        "- Set model_tier='fast' for simple tasks (lookups, web searches, quick questions, "
+        "RULES (follow strictly):\n"
+        "1. PREFER ONE SPECIALIST. Most tasks need only one specialist. Use a single "
+        "template specialist whenever possible. Only assign multiple specialists when "
+        "the task explicitly asks for INDEPENDENT sub-tasks (e.g. 'research X AND build Y').\n"
+        "2. PREFER TEMPLATES OVER DYNAMIC. The research template already has web_search "
+        "and fetch_url — use it for ANY web lookup, question answering, or information "
+        "gathering task. Only use specialist_id='dynamic' when no template covers the "
+        "needed tool combination.\n"
+        "3. NEVER create a dynamic pack without web tools (web_search, fetch_url) if the "
+        "task requires web access.\n"
+        "4. Keep the brief identical to the original task when using a single specialist. "
+        "Do not rephrase, narrow, or split the user's question.\n"
+        "5. Use 'sequential' mode only when later specialists need earlier specialists' "
+        "outputs. Use 'parallel' when tasks are truly independent.\n"
+        "6. Set synthesis_required=true only when multiple specialists produce outputs "
+        "that need combining.\n"
+        "7. Set model_tier='fast' for simple tasks (lookups, web searches, quick questions, "
         "summarisation). Set model_tier='quality' only for complex multi-step tasks, "
         "code generation, or deep analysis. Default to 'fast' when in doubt.\n"
         "Call create_plan with the complete assignment plan."
@@ -191,6 +197,68 @@ def _derive_required_capabilities(
                 if cap not in caps:
                     caps.append(cap)
     return caps
+
+
+def _collapse_redundant_dynamic(
+    assignments: List[SpecialistBrief],
+) -> List[SpecialistBrief]:
+    """Collapse redundant dynamic packs in multi-specialist plans.
+
+    Only applied when there are 2+ assignments.  When a dynamic pack's tool
+    set is a subset of a template that is *already present* in the plan,
+    the dynamic assignment is merged into the existing template (its brief
+    is appended).  This prevents the orchestrator from splitting work across
+    a template and a redundant dynamic pack with the same tools.
+
+    Single-specialist plans and dynamic packs that don't overlap with an
+    already-assigned template are left untouched.
+    """
+    if len(assignments) <= 1:
+        return assignments
+
+    from agentic_concierge.infrastructure.specialists.dynamic_pack import PACK_TEMPLATES
+
+    # Collect template IDs already in the plan
+    template_ids_present = {
+        a.specialist_id for a in assignments if a.specialist_id != "dynamic"
+    }
+
+    result: List[SpecialistBrief] = []
+    for a in assignments:
+        if a.specialist_id != "dynamic" or not a.tools:
+            result.append(a)
+            continue
+
+        tool_set = set(a.tools)
+        # Only collapse into a template that's already in the plan
+        matched_template: Optional[str] = None
+        for tid in template_ids_present:
+            tpl = PACK_TEMPLATES.get(tid)
+            if tpl and tool_set <= set(tpl.tool_names):
+                matched_template = tid
+                break
+
+        if matched_template is None:
+            result.append(a)
+            continue
+
+        # Merge brief into the existing template assignment
+        existing = next((r for r in result if r.specialist_id == matched_template), None)
+        if existing is not None:
+            if a.brief and a.brief not in (existing.brief or ""):
+                existing_brief = existing.brief or ""
+                merged = f"{existing_brief}\n\nAlso: {a.brief}" if existing_brief else a.brief
+                object.__setattr__(existing, "brief", merged)
+            logger.info(
+                "Collapsed dynamic pack (tools=%s) into existing %r",
+                a.tools, matched_template,
+            )
+        else:
+            # Template was supposed to be present but hasn't been added yet
+            # (shouldn't happen since we iterate in order, but handle gracefully)
+            result.append(a)
+
+    return result
 
 
 async def orchestrate_task(
@@ -282,6 +350,12 @@ async def orchestrate_task(
     if not assignments:
         logger.info("Orchestrator produced no valid assignments; falling back")
         return _template_fallback_plan(prompt, config)
+
+    # --- plan deduplication: collapse redundant dynamic packs ----------------
+    # If a dynamic pack's tools are a subset of an existing template, replace
+    # it with that template.  If that creates a duplicate (same template
+    # already assigned), drop it and merge the brief into the existing one.
+    assignments = _collapse_redundant_dynamic(assignments)
 
     specialist_ids = [a.specialist_id for a in assignments]
     required_capabilities = _derive_required_capabilities(specialist_ids, config)

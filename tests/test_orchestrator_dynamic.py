@@ -8,6 +8,7 @@ import pytest
 from agentic_concierge.application.orchestrator import (
     OrchestrationPlan,
     SpecialistBrief,
+    _collapse_redundant_dynamic,
     orchestrate_task,
 )
 from agentic_concierge.config import DEFAULT_CONFIG
@@ -133,3 +134,84 @@ async def test_dynamic_routing_method_is_orchestrator():
         "mixed task",
     )
     assert plan.routing_method == "orchestrator"
+
+
+# ---------------------------------------------------------------------------
+# Plan deduplication tests (_collapse_redundant_dynamic)
+# ---------------------------------------------------------------------------
+
+
+def test_collapse_noop_single_assignment():
+    """Single-specialist plans are never collapsed, even if subset of a template."""
+    assignments = [SpecialistBrief(specialist_id="dynamic", brief="do it", tools=["shell"])]
+    result = _collapse_redundant_dynamic(assignments)
+    assert len(result) == 1
+    assert result[0].specialist_id == "dynamic"
+
+
+def test_collapse_noop_non_overlapping():
+    """Multi-specialist plan where dynamic tools don't overlap any assigned template."""
+    assignments = [
+        SpecialistBrief(specialist_id="research", brief="search for info"),
+        SpecialistBrief(specialist_id="dynamic", brief="run shell", tools=["shell", "run_tests"]),
+    ]
+    result = _collapse_redundant_dynamic(assignments)
+    assert len(result) == 2
+    assert result[1].specialist_id == "dynamic"
+
+
+def test_collapse_merges_redundant_dynamic():
+    """Dynamic pack with tools subset of already-assigned template is merged."""
+    assignments = [
+        SpecialistBrief(specialist_id="research", brief="find stock prices"),
+        SpecialistBrief(
+            specialist_id="dynamic",
+            brief="summarise the findings",
+            tools=["web_search", "fetch_url"],
+        ),
+    ]
+    result = _collapse_redundant_dynamic(assignments)
+    assert len(result) == 1
+    assert result[0].specialist_id == "research"
+    assert "summarise the findings" in result[0].brief
+
+
+def test_collapse_preserves_unrelated_template():
+    """Non-dynamic assignments are always preserved."""
+    assignments = [
+        SpecialistBrief(specialist_id="engineering", brief="build it"),
+        SpecialistBrief(specialist_id="research", brief="look it up"),
+    ]
+    result = _collapse_redundant_dynamic(assignments)
+    assert len(result) == 2
+
+
+@pytest.mark.asyncio
+async def test_collapse_applied_in_orchestrate_task():
+    """Integration: orchestrate_task collapses redundant dynamic packs."""
+    resp = LLMResponse(
+        content=None,
+        tool_calls=[ToolCallRequest(
+            call_id="orch0",
+            tool_name="create_plan",
+            arguments={
+                "assignments": [
+                    {"specialist_id": "research", "brief": "look up AXP stock price"},
+                    {
+                        "specialist_id": "dynamic",
+                        "brief": "format the result",
+                        "tools": ["web_search"],
+                        "role": "formatter",
+                    },
+                ],
+                "mode": "sequential",
+                "synthesis_required": True,
+                "reasoning": "research then format",
+            },
+        )],
+    )
+    plan = await _call_orchestrate(resp, "What is AXP stock price?")
+    # dynamic pack with ["web_search"] is subset of research — collapsed
+    assert len(plan.specialist_assignments) == 1
+    assert plan.specialist_assignments[0].specialist_id == "research"
+    assert "format the result" in plan.specialist_assignments[0].brief

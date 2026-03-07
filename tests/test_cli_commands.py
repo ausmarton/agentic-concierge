@@ -101,7 +101,7 @@ def test_run_success_path():
             return_value=mock_result,
         ),
     ):
-        result = runner.invoke(app, ["run", "write hello world"])
+        result = runner.invoke(app, ["run", "--no-stream", "write hello world"])
     assert result.exit_code == 0
     assert "engineering" in result.output
 
@@ -118,7 +118,7 @@ def test_run_shows_model_info():
             return_value=mock_result,
         ),
     ):
-        result = runner.invoke(app, ["run", "write hello world"])
+        result = runner.invoke(app, ["run", "--no-stream", "write hello world"])
     assert result.exit_code == 0
     assert "llama3.1:8b" in result.output
 
@@ -136,7 +136,7 @@ def test_run_shows_fallback_warnings():
             return_value=mock_result,
         ),
     ):
-        result = runner.invoke(app, ["run", "write hello"])
+        result = runner.invoke(app, ["run", "--no-stream", "write hello"])
     assert result.exit_code == 0
     assert "Warning" in result.output
     assert "Fallback" in result.output
