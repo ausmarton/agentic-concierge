@@ -359,7 +359,7 @@ async def execute_task(
                     )
 
     for sid in specialist_ids:
-        if sid not in config.specialists:
+        if sid != "dynamic" and sid not in config.specialists:
             raise RecruitError(f"Unknown specialist: {sid!r}")
 
     # --- setup -------------------------------------------------------------------
