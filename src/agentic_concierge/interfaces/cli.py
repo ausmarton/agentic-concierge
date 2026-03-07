@@ -36,7 +36,11 @@ def _render_stream_event(console, event: dict) -> None:  # noqa: ARG001
     step = event.get("step")
     prefix = f"[dim]{step}[/dim] " if step else ""
 
-    if kind == "recruitment":
+    if kind == "model_pull":
+        model = data.get("model", "?")
+        console.print(f"{prefix}[bold yellow]↓ pulling {model}[/bold yellow] (first time only, may take a minute)...")
+
+    elif kind == "recruitment":
         specialists = data.get("specialist_ids") or [data.get("specialist_id", "?")]
         caps = data.get("required_capabilities", [])
         caps_str = f"  [dim]capabilities: {', '.join(caps)}[/dim]" if caps else ""

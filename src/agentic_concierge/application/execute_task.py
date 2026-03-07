@@ -316,32 +316,40 @@ async def execute_task(
         # --- model tier selection (ADR-023) ---
         # The orchestrator recommends "fast" or "quality".  When "fast" is
         # recommended and we have a fast model config, resolve the best
-        # available model for that tier.  Adaptive escalation (ADR-020) will
-        # upgrade to a larger model if the fast one can't handle the task.
+        # available model for that tier.  If the fast model isn't available
+        # and auto_pull is enabled, pull it.  Adaptive escalation (ADR-020)
+        # will upgrade to a larger model if the fast one can't handle the task.
         if plan.recommended_model_key != task.model_key:
             tier_cfg = config.models.get(plan.recommended_model_key)
             if tier_cfg is not None:
-                # available_models is list[str] of tool-capable model names.
-                # Check if the preferred tier model (or a same-family variant) is available.
                 preferred = tier_cfg.model
                 if preferred in available_models:
                     tier_model = preferred
-                else:
-                    # Find closest same-family model from available names.
+                elif config.auto_pull_if_missing and tier_cfg.backend == "ollama":
+                    # The fast model isn't available — pull it.
                     from agentic_concierge.infrastructure.llm_discovery import (
-                        _model_family, _param_size_sort_key,
+                        _ollama_pull, _ollama_root, discover_ollama_models,
+                        _is_ollama_chat_capable, select_model as _select_model,
                     )
-                    import math
-                    pref_family = _model_family(preferred)
-                    pref_size = _param_size_sort_key(preferred, None)[0]
-                    same_family = [m for m in available_models if _model_family(m) == pref_family]
-                    if same_family and pref_size > 0:
-                        def _log_dist(name: str) -> float:
-                            sz = _param_size_sort_key(name, None)[0]
-                            return abs(math.log(sz / pref_size)) if sz > 0 else 999.0
-                        tier_model = min(same_family, key=lambda n: (_log_dist(n), _param_size_sort_key(n, None)[0]))
+                    logger.info(
+                        "Fast model %s not available; pulling it now...", preferred,
+                    )
+                    _emit(event_queue, "model_pull", {"model": preferred})
+                    ollama_root = _ollama_root(tier_cfg.base_url)
+                    if _ollama_pull(preferred, ollama_root, timeout_s=600):
+                        # Re-discover after pull
+                        fresh = discover_ollama_models(tier_cfg.base_url, timeout_s=15.0)
+                        fresh = [m for m in (fresh or []) if _is_ollama_chat_capable(m)]
+                        tier_model = _select_model(preferred, fresh, is_ollama=True)
+                        if tier_model:
+                            available_models.append(tier_model)
+                        else:
+                            tier_model = None
                     else:
+                        logger.warning("Failed to pull %s; keeping %s", preferred, model_cfg.model)
                         tier_model = None
+                else:
+                    tier_model = None
 
                 if tier_model is not None and tier_model != model_cfg.model:
                     old_model = model_cfg.model
@@ -349,12 +357,12 @@ async def execute_task(
                     from agentic_concierge.infrastructure.chat import build_chat_client
                     chat_client = build_chat_client(model_cfg)
                     logger.info(
-                        "Model tier selection: orchestrator recommended %r → using %s (was %s)",
-                        plan.recommended_model_key, tier_model, old_model,
+                        "Model tier: using %s for this task (was %s)",
+                        tier_model, old_model,
                     )
-                else:
+                elif tier_model is None:
                     logger.info(
-                        "Model tier %r recommended but no suitable model available; keeping %s",
+                        "Model tier %r: no suitable model; keeping %s",
                         plan.recommended_model_key, model_cfg.model,
                     )
 
