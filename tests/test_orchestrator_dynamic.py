@@ -9,6 +9,7 @@ from agentic_concierge.application.orchestrator import (
     OrchestrationPlan,
     SpecialistBrief,
     _collapse_redundant_dynamic,
+    _dedup_same_id,
     orchestrate_task,
 )
 from agentic_concierge.config import DEFAULT_CONFIG
@@ -215,3 +216,64 @@ async def test_collapse_applied_in_orchestrate_task():
     assert len(plan.specialist_assignments) == 1
     assert plan.specialist_assignments[0].specialist_id == "research"
     assert "format the result" in plan.specialist_assignments[0].brief
+
+
+# ---------------------------------------------------------------------------
+# Same-ID deduplication tests (_dedup_same_id)
+# ---------------------------------------------------------------------------
+
+
+def test_dedup_merges_same_id():
+    """Two research assignments are merged into one with combined briefs."""
+    assignments = [
+        SpecialistBrief(specialist_id="research", brief="look up KO"),
+        SpecialistBrief(specialist_id="research", brief="look up BAC"),
+    ]
+    result = _dedup_same_id(assignments)
+    assert len(result) == 1
+    assert result[0].specialist_id == "research"
+    assert "KO" in result[0].brief
+    assert "BAC" in result[0].brief
+
+
+def test_dedup_preserves_different_ids():
+    """Different specialist IDs are preserved."""
+    assignments = [
+        SpecialistBrief(specialist_id="research", brief="search"),
+        SpecialistBrief(specialist_id="engineering", brief="build"),
+    ]
+    result = _dedup_same_id(assignments)
+    assert len(result) == 2
+
+
+def test_dedup_noop_single():
+    """Single assignment is returned unchanged."""
+    assignments = [SpecialistBrief(specialist_id="research", brief="search")]
+    result = _dedup_same_id(assignments)
+    assert len(result) == 1
+
+
+@pytest.mark.asyncio
+async def test_dedup_applied_in_orchestrate_task():
+    """Integration: orchestrate_task deduplicates same-ID specialists."""
+    resp = LLMResponse(
+        content=None,
+        tool_calls=[ToolCallRequest(
+            call_id="orch0",
+            tool_name="create_plan",
+            arguments={
+                "assignments": [
+                    {"specialist_id": "research", "brief": "look up KO stock price"},
+                    {"specialist_id": "research", "brief": "look up BAC stock price"},
+                ],
+                "mode": "parallel",
+                "synthesis_required": True,
+                "reasoning": "research both stocks",
+            },
+        )],
+    )
+    plan = await _call_orchestrate(resp, "KO and BAC stock prices")
+    assert len(plan.specialist_assignments) == 1
+    assert plan.specialist_assignments[0].specialist_id == "research"
+    assert "KO" in plan.specialist_assignments[0].brief
+    assert "BAC" in plan.specialist_assignments[0].brief

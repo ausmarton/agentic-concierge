@@ -261,6 +261,29 @@ def _collapse_redundant_dynamic(
     return result
 
 
+def _dedup_same_id(assignments: List[SpecialistBrief]) -> List[SpecialistBrief]:
+    """Merge assignments that share the same specialist_id.
+
+    When the orchestrator assigns e.g. ``research, research``, collapse them
+    into a single ``research`` with merged briefs.  This prevents redundant
+    parallel packs doing the same work.
+    """
+    seen: dict[str, SpecialistBrief] = {}
+    result: List[SpecialistBrief] = []
+    for a in assignments:
+        if a.specialist_id in seen:
+            existing = seen[a.specialist_id]
+            if a.brief and a.brief not in (existing.brief or ""):
+                existing_brief = existing.brief or ""
+                merged = f"{existing_brief}\n\nAlso: {a.brief}" if existing_brief else a.brief
+                object.__setattr__(existing, "brief", merged)
+            logger.info("Merged duplicate specialist %r", a.specialist_id)
+        else:
+            seen[a.specialist_id] = a
+            result.append(a)
+    return result
+
+
 async def orchestrate_task(
     prompt: str,
     config: ConciergeConfig,
@@ -351,11 +374,11 @@ async def orchestrate_task(
         logger.info("Orchestrator produced no valid assignments; falling back")
         return _template_fallback_plan(prompt, config)
 
-    # --- plan deduplication: collapse redundant dynamic packs ----------------
-    # If a dynamic pack's tools are a subset of an existing template, replace
-    # it with that template.  If that creates a duplicate (same template
-    # already assigned), drop it and merge the brief into the existing one.
+    # --- plan deduplication ------------------------------------------------
+    # 1. Collapse dynamic packs whose tools are subsets of assigned templates.
     assignments = _collapse_redundant_dynamic(assignments)
+    # 2. Merge duplicate specialist IDs (e.g. research, research → one research).
+    assignments = _dedup_same_id(assignments)
 
     specialist_ids = [a.specialist_id for a in assignments]
     required_capabilities = _derive_required_capabilities(specialist_ids, config)
