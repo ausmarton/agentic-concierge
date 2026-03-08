@@ -112,6 +112,17 @@ The sub-specialist runs in the same workspace. Its result is returned to you
 as the tool result. Only delegate clearly scoped sub-tasks.
 """
 
+PROMPT_CONSULT_GUIDANCE = """\
+## Specialist model consultation
+You have access to the consult_specialist_model tool. Use it when a sub-task
+requires domain expertise that a specialized model handles better:
+- specialty="code" for code generation or refactoring
+- specialty="sql" for writing SQL queries
+- specialty="reasoning" for complex logical or mathematical reasoning
+The specialist response is text only (no tool calling). Incorporate its output
+into your work and verify correctness before proceeding.
+"""
+
 PROMPT_REVIEWER = """\
 You are an independent code/work reviewer. Your job is to verify the specialist's \
 claimed output. You have read-only access to the workspace.
@@ -192,6 +203,9 @@ def generate_system_prompt(
 
     if has_delegation:
         parts.append(PROMPT_DELEGATION_GUIDANCE)
+
+    if "consult_specialist_model" in tool_names:
+        parts.append(PROMPT_CONSULT_GUIDANCE)
 
     parts.append(PROMPT_LOOP_AVOIDANCE)
 

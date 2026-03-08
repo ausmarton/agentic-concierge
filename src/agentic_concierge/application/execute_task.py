@@ -182,6 +182,56 @@ _DELEGATE_TOOL_DEF: Dict[str, Any] = {
 }
 
 
+def _select_specialist_model(
+    assignment: Optional[SpecialistBrief],
+    available_models: List[str],
+    base_model_cfg: "ModelConfig",
+    chat_client: "ChatClient",
+) -> tuple["ModelConfig", "ChatClient"]:
+    """Select the best model for a specialist based on its task capabilities.
+
+    Returns the (possibly updated) model_cfg and chat_client.  When no better
+    model is found or only one model is available, returns the originals unchanged.
+    """
+    if not available_models or len(available_models) <= 1 or assignment is None:
+        return base_model_cfg, chat_client
+
+    from agentic_concierge.infrastructure.model_profiles import (
+        infer_task_capabilities,
+        match_models,
+    )
+
+    # Use explicit capabilities from orchestrator when available;
+    # otherwise infer from template/tools.
+    if assignment.required_capabilities:
+        caps = {c: 0.6 for c in assignment.required_capabilities}
+    else:
+        caps = infer_task_capabilities(
+            template_id=assignment.specialist_id if assignment.specialist_id != "dynamic" else None,
+            tool_names=assignment.tools,
+        )
+    if not caps:
+        return base_model_cfg, chat_client
+
+    best = match_models(available_models, required_capabilities=caps)
+    if not best or best == base_model_cfg.model:
+        return base_model_cfg, chat_client
+
+    new_cfg = ModelConfig(
+        base_url=base_model_cfg.base_url,
+        model=best,
+        backend=base_model_cfg.backend,
+        api_key=base_model_cfg.api_key,
+        timeout_s=base_model_cfg.timeout_s,
+    )
+    new_client = _rebuild_chat_client(new_cfg, chat_client)
+    logger.info(
+        "Per-specialist model: %s → %s (caps=%s)",
+        base_model_cfg.model, best, caps,
+    )
+    return new_cfg, new_client
+
+
 def _emit(
     queue: Optional[asyncio.Queue],
     kind: str,
@@ -498,6 +548,12 @@ async def execute_task(
                     specialist_id, workspace_path, task.network_allowed,
                     tools=assignment.tools if assignment else None,
                     role=assignment.role if assignment else None,
+                    finish_schema_key=assignment.finish_schema if assignment else None,
+                )
+
+                # Per-specialist model selection (ADR-024)
+                spec_model_cfg, spec_chat_client = _select_specialist_model(
+                    assignment, available_models, model_cfg, chat_client,
                 )
 
                 if is_task_force:
@@ -536,8 +592,8 @@ async def execute_task(
                 pack_payload = await _execute_pack_loop(
                     pack=pack,
                     messages=messages,
-                    model_cfg=model_cfg,
-                    chat_client=chat_client,
+                    model_cfg=spec_model_cfg,
+                    chat_client=spec_chat_client,
                     run_repository=run_repository,
                     run_id=run_id,
                     step_prefix=step_prefix,
@@ -1108,6 +1164,8 @@ async def _review_specialist_work(
     specialist_id: str,
     event_queue: Optional[asyncio.Queue],
     review_iteration: int,
+    reviewer_model_cfg: Optional[ModelConfig] = None,
+    available_models: Optional[List[str]] = None,
 ) -> tuple:
     """Independently review a specialist's finish_task payload.
 
@@ -1116,15 +1174,50 @@ async def _review_specialist_work(
     or ``request_revision``.  Plain text or reaching max steps without a
     decision tool is treated as implicit approval (fail-open).
 
+    When ``reviewer_model_cfg`` is provided, a separate chat client is built
+    for the reviewer.  Otherwise falls back to the doer's model.
+
     Returns:
         ``(approved: bool, comment_or_critique: str)``
     """
     from agentic_concierge.infrastructure.specialists.prompts import PROMPT_REVIEWER
 
+    # Select reviewer model: prefer a different model with reasoning capability
+    rev_model_cfg = reviewer_model_cfg or model_cfg
+    rev_client = chat_client
+    if reviewer_model_cfg is None and available_models:
+        try:
+            from agentic_concierge.infrastructure.model_profiles import match_models
+            reviewer_model = match_models(
+                available_models,
+                required_capabilities={"reasoning": 0.7, "instruction_following": 0.6},
+                exclude_models=[model_cfg.model],
+                prefer_smaller=True,
+            )
+            if reviewer_model and reviewer_model != model_cfg.model:
+                rev_model_cfg = ModelConfig(
+                    base_url=model_cfg.base_url,
+                    model=reviewer_model,
+                    backend=model_cfg.backend,
+                    api_key=model_cfg.api_key,
+                    temperature=0.0,
+                    top_p=model_cfg.top_p,
+                    max_tokens=model_cfg.max_tokens,
+                    timeout_s=model_cfg.timeout_s,
+                )
+                rev_client = _rebuild_chat_client(rev_model_cfg, chat_client)
+                logger.info(
+                    "Reviewer using different model: %s (doer=%s)",
+                    reviewer_model, model_cfg.model,
+                )
+        except Exception as exc:
+            logger.debug("Reviewer model selection failed (%s); using doer model", exc)
+
     # Emit review_start event
     _rev_start = {
         "specialist_id": specialist_id,
         "review_iteration": review_iteration,
+        "reviewer_model": rev_model_cfg.model,
     }
     run_repository.append_event(run_id, "review_start", _rev_start, step=None)
     _emit(event_queue, "review_start", _rev_start)
@@ -1150,12 +1243,12 @@ async def _review_specialist_work(
     _MAX_REVIEWER_STEPS = 5
     for _rev_step in range(_MAX_REVIEWER_STEPS):
         try:
-            response = await chat_client.chat(
+            response = await rev_client.chat(
                 messages=rev_messages,
-                model=model_cfg.model,
+                model=rev_model_cfg.model,
                 tools=reviewer_tools,
                 temperature=0.0,
-                max_tokens=model_cfg.max_tokens,
+                max_tokens=rev_model_cfg.max_tokens,
             )
         except Exception as exc:
             # Reviewer LLM failure → fail-open (implicit approval)
@@ -1275,7 +1368,14 @@ async def _run_task_force_parallel(
             specialist_id, workspace_path, task.network_allowed,
             tools=assignment.tools if assignment else None,
             role=assignment.role if assignment else None,
+            finish_schema_key=assignment.finish_schema if assignment else None,
         )
+
+        # Per-specialist model selection (ADR-024)
+        spec_model_cfg, spec_chat_client = _select_specialist_model(
+            assignment, available_models or [], model_cfg, chat_client,
+        )
+
         pack_start_ev = {"specialist_id": specialist_id, "pack_index": pack_idx}
         run_repository.append_event(run_id, "pack_start", pack_start_ev, step=None)
         _emit(event_queue, "pack_start", pack_start_ev)
@@ -1293,8 +1393,8 @@ async def _run_task_force_parallel(
         return await _execute_pack_loop(
             pack=pack,
             messages=messages,
-            model_cfg=model_cfg,
-            chat_client=chat_client,
+            model_cfg=spec_model_cfg,
+            chat_client=spec_chat_client,
             run_repository=run_repository,
             run_id=run_id,
             step_prefix=step_prefix,
@@ -2065,6 +2165,7 @@ async def _execute_pack_loop(
                         specialist_id=specialist_id,
                         event_queue=event_queue,
                         review_iteration=review_iteration_count,
+                        available_models=available_models,
                     )
                     if not approved:
                         review_iteration_count += 1

@@ -2,8 +2,31 @@
 
 **Purpose:** Single source of truth for “where we are” so any human or agent can resume work across restarts and sessions.
 
-**Last updated:** 2026-03-05. Fast CI: **707 pass** (`make test`).
+**Last updated:** 2026-03-08. Fast CI: **799 pass** (`make test`).
 Rust launcher: **22 tests pass** (`make test-rust`).
+
+---
+
+## Specialist Marketplace Architecture — **complete** (2026-03-08)
+
+Six ADRs (023–028) implemented in 5 phases. Adds capability-driven model selection,
+non-tool-calling model consultation, adaptive finish schemas, independent reviewer model
+selection, and capability-driven orchestrator routing.
+
+| Phase | ADR | What | New files | Tests added |
+|-------|-----|------|-----------|-------------|
+| A | 023: Model Capability Registry | `ModelCapabilityProfile`, `get_profile()`, `match_models()`, `infer_task_capabilities()` | `infrastructure/model_profiles.py`, `tests/test_model_profiles.py` | ~10 |
+| B | 026: Adaptive Finish Schemas | `FINISH_SCHEMAS`, `get_finish_schema()`, `finish_schema_key` threading | `infrastructure/specialists/finish_schemas.py`, `tests/test_finish_schemas.py` | ~8 |
+| C | 027: Independent Reviewer Model | `_select_reviewer_model()`, reviewer uses different model | `tests/test_reviewer_model.py` | ~4 |
+| D | 024+025: Per-Specialist Model + Consult | `_select_specialist_model()`, `consult_specialist_model` tool, `set_runtime_models()` | `infrastructure/tools/consult.py`, `tests/test_consult_model.py`, `tests/test_per_specialist_model.py` | ~14 |
+| E | 028: Capability-Driven Orchestrator | `required_capabilities` on `SpecialistBrief`, `_resolve_specialist_from_capabilities()` | `tests/test_capability_routing.py`, `tests/test_specialist_marketplace_integration.py` | ~25 |
+
+**Key architectural changes:**
+- `SpecialistRegistry` protocol gains `set_runtime_models()` (no infrastructure params in app layer).
+- `ConfigSpecialistRegistry` manages runtime model state internally via `_needs_consult_tool()`, `_maybe_add_consult()`, `_llm_kwargs()`.
+- `_select_specialist_model()` picks per-specialist models using capability profiles.
+- `consult_specialist_model` automatically injected when non-tool-calling models detected.
+- Orchestrator routes by capabilities, not template names.
 
 ---
 
@@ -371,7 +394,7 @@ All Phase 1 functional requirements (FR1–FR6 in REQUIREMENTS.md) have automate
 **The backlog is the canonical source for what to work on next.**
 
 1. Read [BACKLOG.md](BACKLOG.md) — find the first non-done item; that is what to work on.
-2. Run `pytest tests/ -k “not real_llm and not verify and not real_mcp”` — confirm **707 pass** before touching code.
+2. Run `pytest tests/ -k “not real_llm and not verify and not real_mcp”` — confirm **799 pass** before touching code.
 3. Phase 12 is complete — see BACKLOG.md for Phase 13 planning or add new items.
 4. See [DECISIONS.md](DECISIONS.md) for rationale behind key architectural choices.
 

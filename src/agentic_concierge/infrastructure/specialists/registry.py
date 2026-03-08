@@ -60,6 +60,7 @@ class ConfigSpecialistRegistry(SpecialistRegistry):
     def __init__(self, config: ConciergeConfig):
         self._config = config
         self._feature_set = self._load_feature_set()
+        self._all_chat_models: List[str] = []
 
     def _load_feature_set(self) -> FeatureSet:
         """Detect the profile tier once and build the feature set."""
@@ -71,6 +72,48 @@ class ConfigSpecialistRegistry(SpecialistRegistry):
             tier = ProfileTier.SMALL
         return FeatureSet.from_profile(tier, self._config.features)
 
+    def set_runtime_models(self, all_chat_models: List[str]) -> None:
+        """Set the full list of chat-capable models (including non-tool-calling).
+
+        Called once after LLM discovery so the registry can inject
+        ``consult_specialist_model`` when non-tool-calling specialists are
+        available.
+        """
+        self._all_chat_models = list(all_chat_models)
+
+    def _needs_consult_tool(self) -> bool:
+        """Check whether any discovered model lacks tool-calling support."""
+        if not self._all_chat_models:
+            return False
+        from agentic_concierge.infrastructure.model_profiles import get_profile
+        return any(
+            not get_profile(m).supports_tool_calling
+            for m in self._all_chat_models
+        )
+
+    def _llm_kwargs(self) -> dict:
+        """Extract LLM connection params from config for consult tool executors."""
+        # Use the first available model config for base_url/backend/api_key.
+        for cfg in self._config.models.values():
+            return {
+                "all_chat_models": self._all_chat_models,
+                "base_url": cfg.base_url,
+                "backend": cfg.backend,
+                "api_key": cfg.api_key,
+            }
+        return {
+            "all_chat_models": self._all_chat_models,
+            "base_url": "http://localhost:11434/v1",
+            "backend": "ollama",
+            "api_key": "",
+        }
+
+    def _maybe_add_consult(self, tool_names: List[str]) -> List[str]:
+        """Return tool_names with consult_specialist_model appended if needed."""
+        if self._needs_consult_tool() and "consult_specialist_model" not in tool_names:
+            return tool_names + ["consult_specialist_model"]
+        return tool_names
+
     def get_pack(
         self,
         specialist_id: str,
@@ -79,18 +122,24 @@ class ConfigSpecialistRegistry(SpecialistRegistry):
         *,
         tools: Optional[List[str]] = None,
         role: Optional[str] = None,
+        finish_schema_key: Optional[str] = None,
     ) -> SpecialistPack:
+        llm_kw = self._llm_kwargs()
+
         # Dynamic pack: tools explicitly provided (from orchestrator)
         if tools is not None:
+            effective_tools = self._maybe_add_consult(list(tools))
             logger.debug(
-                "Building dynamic pack for %r with tools=%s", specialist_id, tools
+                "Building dynamic pack for %r with tools=%s", specialist_id, effective_tools
             )
             pack = build_dynamic_pack(
                 specialist_id=specialist_id,
-                tool_names=tools,
+                tool_names=effective_tools,
                 role_description=role or f"You are a specialist agent (id={specialist_id}).",
                 workspace_path=workspace_path,
                 network_allowed=network_allowed,
+                finish_schema_key=finish_schema_key,
+                **llm_kw,
             )
             if hasattr(pack, "set_feature_set"):
                 pack.set_feature_set(self._feature_set)
@@ -109,7 +158,25 @@ class ConfigSpecialistRegistry(SpecialistRegistry):
             builder = _load_builder(spec_cfg.builder)
             pack = builder(workspace_path, network_allowed)
         elif specialist_id in PACK_TEMPLATES:
-            pack = build_template_pack(specialist_id, workspace_path, network_allowed)
+            tpl = PACK_TEMPLATES[specialist_id]
+            if self._needs_consult_tool():
+                tpl_tools = self._maybe_add_consult(list(tpl.tool_names))
+                pack = build_dynamic_pack(
+                    specialist_id=specialist_id,
+                    tool_names=tpl_tools,
+                    role_description=tpl.role_description,
+                    workspace_path=workspace_path,
+                    network_allowed=network_allowed,
+                    finish_schema=tpl.finish_schema,
+                    quality_gates=tpl.quality_gates,
+                    finish_schema_key=finish_schema_key,
+                    **llm_kw,
+                )
+            else:
+                pack = build_template_pack(
+                    specialist_id, workspace_path, network_allowed,
+                    finish_schema_key=finish_schema_key,
+                )
         else:
             raise ValueError(
                 f"No pack implementation for specialist {specialist_id!r}. "

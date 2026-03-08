@@ -40,6 +40,7 @@ class ResolvedLLM:
     fallback_used: bool = False
     resolved_backend: str = ""  # "ollama", "vllm", "inprocess", "cloud"
     available_models: list[str] = field(default_factory=list)
+    all_chat_models: list[str] = field(default_factory=list)  # includes non-tool-calling models
 
 
 def _ollama_root(base_url: str) -> str:
@@ -106,7 +107,9 @@ _EMBEDDING_ONLY_FAMILIES_OR_NAMES = frozenset(
     )
 )
 
-# Models that can chat but do NOT support OpenAI-style tool calling
+# Models that can chat but do NOT support OpenAI-style tool calling.
+# DEPRECATED: retained for backward-compatible imports.  The authoritative
+# source is now ``infrastructure.model_profiles.get_profile(...).supports_tool_calling``.
 _TOOL_INCAPABLE_NAMES = frozenset(
     s.lower()
     for s in (
@@ -138,15 +141,17 @@ def _is_ollama_chat_capable(m: dict) -> bool:
 
 
 def _is_tool_capable(m: dict) -> bool:
-    """True if this Ollama model supports OpenAI-style tool calling."""
+    """True if this Ollama model supports OpenAI-style tool calling.
+
+    Delegates to ``model_profiles.get_profile()`` so that new model families
+    are handled via the capability registry rather than a static blocklist.
+    """
     if not _is_ollama_chat_capable(m):
         return False
     name = (_ollama_model_name(m) or "").lower()
-    family = ((m.get("details") or {}).get("family") or "").lower()
-    for prefix in _TOOL_INCAPABLE_NAMES:
-        if name.startswith(prefix) or family.startswith(prefix):
-            return False
-    return True
+    from agentic_concierge.infrastructure.model_profiles import get_profile
+    profile = get_profile(name)
+    return profile.supports_tool_calling
 
 
 def _param_size_sort_key(name: str, details: dict | None) -> tuple:
@@ -399,6 +404,7 @@ def _try_ollama(
         return None
 
     tool_capable_names = [n for n in (_ollama_model_name(m) for m in models if _is_tool_capable(m)) if n]
+    all_chat_names = [n for n in (_ollama_model_name(m) for m in models if _is_ollama_chat_capable(m)) if n]
     resolved_config = ModelConfig(
         base_url=base_url,
         model=selected,
@@ -415,6 +421,7 @@ def _try_ollama(
         model_config=resolved_config,
         resolved_backend="ollama",
         available_models=tool_capable_names,
+        all_chat_models=all_chat_names,
     )
 
 
@@ -592,6 +599,7 @@ def resolve_llm(
                     model_config=resolved_config,
                     resolved_backend="ollama",
                     available_models=tool_capable_names,
+                    all_chat_models=list(names),
                     warnings=warnings,
                 )
             # No models: optional auto-pull
@@ -607,6 +615,7 @@ def resolve_llm(
                     if models2:
                         selected = select_model(pull_model, models2, is_ollama=True) or _ollama_model_name(models2[0])
                         tc_names2 = [n for n in (_ollama_model_name(m) for m in models2 if _is_tool_capable(m)) if n]
+                        all_names2 = [n for n in (_ollama_model_name(m) for m in models2) if n]
                         resolved_config = ModelConfig(
                             base_url=model_cfg.base_url,
                             model=selected,
@@ -622,6 +631,7 @@ def resolve_llm(
                             model_config=resolved_config,
                             resolved_backend="ollama",
                             available_models=tc_names2,
+                            all_chat_models=all_names2,
                         )
             primary_error = f"No chat-capable models at {model_cfg.base_url}"
         else:

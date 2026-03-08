@@ -78,6 +78,27 @@ def _fetch_url_executor(_policy: SandboxPolicy, **_kw: Any) -> Callable[..., Any
     return lambda url: fetch_url(url)
 
 
+def _consult_specialist_executor(_policy: SandboxPolicy, **kw: Any) -> Callable[..., Any]:
+    """Executor for consult_specialist_model. Requires async execution."""
+    all_chat_models = kw.get("all_chat_models", [])
+    base_url = kw.get("base_url", "http://localhost:11434/v1")
+    backend = kw.get("backend", "ollama")
+    api_key = kw.get("api_key", "")
+
+    async def _consult(specialty: str, prompt: str) -> dict:
+        from agentic_concierge.infrastructure.tools.consult import execute_consult
+        return await execute_consult(
+            specialty=specialty,
+            prompt=prompt,
+            all_chat_models=all_chat_models,
+            base_url=base_url,
+            backend=backend,
+            api_key=api_key,
+        )
+
+    return _consult
+
+
 def _cross_run_search_executor(_policy: SandboxPolicy, **kw: Any) -> Callable[..., Any]:
     workspace_root = kw.get("workspace_root", "")
 
@@ -185,6 +206,31 @@ _FETCH_URL_TOOL_DEF = make_tool_def(
     },
 )
 
+_CONSULT_SPECIALIST_TOOL_DEF = make_tool_def(
+    "consult_specialist_model",
+    (
+        "Consult a specialized AI model for a specific sub-task. "
+        "Use for code generation, SQL queries, or domain-specific questions "
+        "where a specialized model outperforms a generalist. "
+        "Returns the specialist model's response as text."
+    ),
+    {
+        "type": "object",
+        "properties": {
+            "prompt": {
+                "type": "string",
+                "description": "The question or task for the specialist model.",
+            },
+            "specialty": {
+                "type": "string",
+                "enum": ["code", "sql", "reasoning"],
+                "description": "What kind of specialist to consult.",
+            },
+        },
+        "required": ["prompt", "specialty"],
+    },
+)
+
 _CROSS_RUN_SEARCH_TOOL_DEF = make_tool_def(
     "cross_run_search",
     (
@@ -265,6 +311,13 @@ TOOL_CATALOG: Dict[str, ToolEntry] = {
         openai_def=_FETCH_URL_TOOL_DEF,
         executor_factory=_fetch_url_executor,
         requires_network=True,
+    ),
+    "consult_specialist_model": ToolEntry(
+        name="consult_specialist_model",
+        description="Consult a specialized AI model (code, SQL, reasoning)",
+        category="ai",
+        openai_def=_CONSULT_SPECIALIST_TOOL_DEF,
+        executor_factory=_consult_specialist_executor,
     ),
     "cross_run_search": ToolEntry(
         name="cross_run_search",

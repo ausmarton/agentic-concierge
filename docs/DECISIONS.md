@@ -913,3 +913,210 @@ calls it, the loop creates a sub-specialist via the registry and runs a nested
   and `config` parameters.
 - Step key prefixing enables attribution in runlog (`s5.d1.s0`).
 - Max depth = 1 keeps the system predictable and debuggable.
+
+
+### ADR-023: Model Capability Registry — Scored Profiles per Model Family
+
+**Date:** 2026-03-08
+**Status:** Accepted
+
+**Context:**
+`_TOOL_INCAPABLE_NAMES` is a static blocklist. `select_model()` picks by size only. There
+is no way to say "this task needs code generation, prefer qwen2.5-coder:7b over llama3.1:7b."
+Non-tool-calling models (sqlcoder, deepseek-coder, codellama) are blocked entirely even though
+they could be valuable for specific sub-tasks.
+
+**Decision:**
+Create `infrastructure/model_profiles.py` with `ModelCapabilityProfile` dataclass. Each model
+family gets scored capabilities (0.0–1.0) and a `supports_tool_calling` bool. Profiles are
+loaded from a bundled dict, extensible via config. `_TOOL_INCAPABLE_NAMES` is replaced by
+`get_profile(name).supports_tool_calling`.
+
+**Design:**
+- `ModelCapabilityProfile`: `family`, `supports_tool_calling`, `capabilities: dict[str, float]`.
+- `BUILTIN_PROFILES`: bundled profiles for qwen2.5, qwen2.5-coder, llama3.1, phi-4-mini,
+  deepseek-r1-distill, sqlcoder, deepseek-coder, codellama, gemma2.
+- `get_profile(model_name)`: fuzzy-match family from model name; unknown → permissive default.
+- `match_models()`: filter available models by capability thresholds, return best match.
+- `infer_task_capabilities()`: map template ID or tool names → required capabilities.
+
+**Backward compatibility:**
+- `_is_tool_capable()` produces identical results for all currently-blocked families.
+- Unknown model families get a permissive default (tool_calling=true, all caps=0.5).
+
+**Consequences:**
+- Model selection can now be capability-driven rather than size-driven.
+- Non-tool-calling models are still excluded from the tool loop but can be used via consult.
+- New capabilities and families can be added without code changes (config override).
+
+
+### ADR-024: Per-Specialist Model Selection — Task-Capability Matching
+
+**Date:** 2026-03-08
+**Status:** Accepted
+
+**Context:**
+All specialists use the same globally-resolved model. If qwen2.5-coder:7b is pulled alongside
+qwen2.5:7b, the engineering specialist should prefer the coder variant. The system has no
+mechanism for per-specialist model selection.
+
+**Decision:**
+Each specialist assignment gets its own model selected by matching task capabilities against
+model profiles. `_select_specialist_model()` in `execute_task.py` infers capabilities from the
+specialist template and/or the orchestrator's `required_capabilities`, then calls `match_models()`
+to find the best-scoring available model.
+
+**Design:**
+- `_select_specialist_model(assignment, available_models, base_model_cfg, chat_client)`:
+  returns `(ModelConfig, ChatClient)`, potentially switching the model.
+- When `assignment.required_capabilities` is set (from ADR-028), it overrides template inference.
+- When only one model is available or the base model is already best, returns originals (no-op).
+- Wired into both sequential and parallel (`_run_task_force_parallel`) execution paths.
+
+**Backward compatibility:**
+- Single-model setups (common case): returns the same model unchanged.
+- No changes to `_execute_pack_loop` signature.
+
+**Consequences:**
+- Engineering tasks prefer coder models; research tasks prefer generalist models.
+- Model switching happens before the pack loop, not during.
+- `_rebuild_chat_client()` constructs a new client for the selected model.
+
+
+### ADR-025: Non-Tool-Calling Execution Path (`consult_specialist_model`)
+
+**Date:** 2026-03-08
+**Status:** Accepted
+
+**Context:**
+Models like sqlcoder, deepseek-coder, codellama are blocked because they can't do OpenAI tool
+calling. But they could be valuable for specific sub-tasks (SQL generation, code completion).
+
+**Decision:**
+A `consult_specialist_model` tool in the tool catalog that lets a tool-calling agent consult a
+non-tool-calling model for a specific sub-task. The tool executor does a single chat completion
+(no tool loop) and returns the response as the tool result.
+
+**Design:**
+- `infrastructure/tools/consult.py`: `execute_consult()` function + `_consult_specialist_executor()`
+  closure factory that captures `all_chat_models` and `base_url`.
+- Tool definition: `specialty` (enum: code, sql, reasoning) + `prompt` string.
+- `SPECIALTY_CAPABILITIES` maps specialties to capability requirements with
+  `require_tool_calling=False`.
+- `match_models()` called with `require_tool_calling=False` to find the best specialist.
+- `ConfigSpecialistRegistry.set_runtime_models()` injects `all_chat_models` once after LLM
+  discovery. `_needs_consult_tool()` checks if any model lacks tool-calling support.
+- `_maybe_add_consult()` automatically appends `consult_specialist_model` to pack tool lists
+  when non-TC models are detected.
+
+**Backward compatibility:**
+- Tool only included in packs when non-tool-calling models are discovered.
+- When all models support tool calling, no consult tool is injected.
+- `set_runtime_models()` added to `SpecialistRegistry` protocol; callers updated.
+
+**Consequences:**
+- Non-tool-calling models are now accessible as domain experts via the consult tool.
+- Single-shot call (no loop) keeps latency bounded.
+- Infrastructure concerns (base_url, model list) stay in `ConfigSpecialistRegistry`,
+  not in the application layer protocol.
+
+
+### ADR-026: Adaptive Finish Schemas — Task-Appropriate Output Structure
+
+**Date:** 2026-03-08
+**Status:** Accepted
+
+**Context:**
+The research template forces `_RESEARCH_FINISH_SCHEMA` with `executive_summary`, `citations`,
+`bibliography_path`, etc. When someone asks "How much does Amex Platinum cost?", the LLM wastes
+steps creating bibliography files and fabricates citation metadata to satisfy the schema.
+
+**Decision:**
+Replace per-template finish schemas with a schema selector. `finish_schemas.py` defines four
+schema shapes: `quick_answer`, `research_report`, `code`, `general`. The orchestrator can
+specify `finish_schema` per specialist assignment, overriding the template default.
+
+**Design:**
+- `infrastructure/specialists/finish_schemas.py`: `FINISH_SCHEMAS` dict, `get_finish_schema()`.
+- `SpecialistBrief.finish_schema: Optional[str]` — when set, overrides template default.
+- `build_dynamic_pack()` and `build_template_pack()` accept `finish_schema_key` param.
+- `create_plan` tool schema includes `finish_schema` enum field.
+- Existing schemas moved from `dynamic_pack.py` to `finish_schemas.py`.
+
+**Backward compatibility:**
+- When `finish_schema` is None (default), the template's built-in schema is used — identical
+  to current behavior.
+- Existing test packs that pass `finish_schema=None` see no change.
+
+**Consequences:**
+- Simple factual questions can use `quick_answer` (no artifacts, no bibliography).
+- LLM orchestrator makes the schema decision, not the template.
+- Schema shapes are extensible without modifying template code.
+
+
+### ADR-027: Independent Reviewer Model — Cross-Model Quality Gate
+
+**Date:** 2026-03-08
+**Status:** Accepted
+
+**Context:**
+Gate 4 (reviewer) in `_execute_pack_loop` uses the same model as the doer. A 7b model
+rubber-stamps its own 7b output. The reviewer should use a different model, preferably one
+with strong reasoning capabilities.
+
+**Decision:**
+The reviewer model is selected independently using the Model Capability Registry. It prefers
+reasoning-focused models (phi-4-mini, deepseek-r1-distill) and excludes the doer's model.
+`_review_specialist_work()` accepts `reviewer_model_cfg` and builds a separate chat client.
+
+**Design:**
+- `_select_reviewer_model()` in `execute_task.py`: calls `match_models()` with
+  `required_capabilities={"reasoning": 0.7, "instruction_following": 0.6}`,
+  excluding the current model.
+- `_review_specialist_work()` gains `reviewer_model_cfg` param.
+- Fallback: when no alternative model is available, uses same model (identical to today).
+
+**Backward compatibility:**
+- `reviewer_model_cfg=None` → identical behavior to today.
+- Only activates when multiple models are available.
+- Existing `max_review_iterations=0` tests unchanged.
+
+**Consequences:**
+- Review quality improves when multiple models are available.
+- No behavioral change on single-model setups.
+
+
+### ADR-028: Capability-Driven Orchestrator — Route by What, Not by Name
+
+**Date:** 2026-03-08
+**Status:** Accepted
+
+**Context:**
+The orchestrator routes by template name. Its system prompt says "Available specialist templates:
+engineering, research." This forces the LLM to think in template terms rather than capability
+terms. Adding a new specialist type requires prompt changes.
+
+**Decision:**
+The orchestrator prompt switches to capability-driven language. `create_plan` gets
+`required_capabilities` array per assignment. When capabilities are specified, the system
+(not the LLM) resolves them to template + model via `_resolve_specialist_from_capabilities()`.
+`specialist_id` becomes optional in the schema.
+
+**Design:**
+- `SpecialistBrief.required_capabilities: Optional[List[str]]`.
+- `create_plan` schema: `required_capabilities` array field; `specialist_id` optional.
+- `_resolve_specialist_from_capabilities()`: scores each template against requested capabilities
+  using `_TEMPLATE_CAPABILITIES` from model_profiles.py; returns best-matching template ID.
+- Orchestrator system prompt updated with capability-driven language and capability catalog.
+- When `required_capabilities` is provided to `_select_specialist_model()`, it overrides
+  template-based inference.
+
+**Backward compatibility:**
+- Template names still work as `specialist_id` values.
+- When capabilities are not specified, template resolution is unchanged.
+- Fallback behavior unchanged.
+
+**Consequences:**
+- The orchestrator describes tasks in capability terms, not template terms.
+- New model families automatically benefit from capability matching without prompt changes.
+- `_select_specialist_model()` respects explicit capabilities from the orchestrator.

@@ -20,7 +20,8 @@ from agentic_concierge.infrastructure.specialists.tool_catalog import (
 
 def test_catalog_has_all_expected_tools():
     expected = {"shell", "read_file", "write_file", "list_files",
-                "run_tests", "web_search", "fetch_url", "cross_run_search"}
+                "run_tests", "web_search", "fetch_url", "cross_run_search",
+                "consult_specialist_model"}
     assert set(TOOL_CATALOG.keys()) == expected
 
 

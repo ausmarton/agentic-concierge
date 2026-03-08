@@ -168,6 +168,7 @@ async def run(req: RunRequest):
     chat_client = build_chat_client(resolved.model_config)
     run_repository = FileSystemRunRepository(workspace_root=_workspace_root())
     specialist_registry = ConfigSpecialistRegistry(config)
+    specialist_registry.set_runtime_models(resolved.all_chat_models)
 
     task = build_task(req.prompt, req.pack, req.model_key, req.network_allowed)
     try:
@@ -286,6 +287,7 @@ async def run_stream(req: RunRequest):
     chat_client = build_chat_client(resolved.model_config)
     run_repository = FileSystemRunRepository(workspace_root=_workspace_root())
     specialist_registry = ConfigSpecialistRegistry(config)
+    specialist_registry.set_runtime_models(resolved.all_chat_models)
     task = build_task(req.prompt, req.pack, req.model_key, req.network_allowed)
 
     # Bounded queue — prevents unbounded memory accumulation if the client reads slowly.

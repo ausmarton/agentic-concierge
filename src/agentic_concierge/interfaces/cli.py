@@ -212,6 +212,7 @@ def run(
     chat_client = build_chat_client(resolved.model_config)
     run_repository = FileSystemRunRepository(workspace_root=_workspace_root())
     specialist_registry = ConfigSpecialistRegistry(config)
+    specialist_registry.set_runtime_models(resolved.all_chat_models)
     task = build_task(prompt, pack, model_key, network_allowed)
 
     # Approval channel: interactive CLI prompt unless --auto-approve is set.
@@ -618,6 +619,7 @@ def resume_cmd(
     chat_client = build_chat_client(resolved.model_config)
     run_repository = FileSystemRunRepository(workspace_root=workspace)
     specialist_registry = ConfigSpecialistRegistry(config)
+    specialist_registry.set_runtime_models(resolved.all_chat_models)
 
     try:
         result = asyncio.run(

@@ -105,6 +105,12 @@ class SpecialistRegistry(Protocol):
         *,
         tools: Optional[List[str]] = None,
         role: Optional[str] = None,
+        finish_schema_key: Optional[str] = None,
     ) -> SpecialistPack: ...
+
+    def set_runtime_models(self, all_chat_models: List[str]) -> None:
+        """Inform the registry of all discovered chat-capable models (including
+        non-tool-calling ones). Called once after LLM discovery."""
+        ...
 
     def list_ids(self) -> List[str]: ...
