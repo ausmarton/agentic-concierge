@@ -149,9 +149,45 @@ fn ensure_extras(config: &LauncherConfig) -> anyhow::Result<()> {
         return Err(SetupError::PackageInstall { code, stderr }.into());
     }
 
+    // Post-install: download Playwright browsers when browser extra is included.
+    if requested.contains("browser") || requested == "all" {
+        ensure_playwright_browsers(config);
+    }
+
     // Update marker so we don't re-install next time.
     std::fs::write(&config.extras_file, requested)?;
     Ok(())
+}
+
+/// Download Playwright browser binaries if the browser extra is installed.
+///
+/// Runs `python -m playwright install chromium` inside the managed venv.
+/// Failure is non-fatal — browser tools will simply be unavailable.
+fn ensure_playwright_browsers(config: &LauncherConfig) {
+    let python = config.venv_dir.join("bin").join("python");
+    if !python.exists() {
+        return;
+    }
+    eprintln!("[concierge] downloading Playwright browser binaries...");
+    match std::process::Command::new(&python)
+        .args(["-m", "playwright", "install", "chromium"])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            eprintln!("[concierge] Playwright browsers installed");
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!(
+                "[concierge] WARNING: Playwright browser install failed (exit {}): {}",
+                output.status.code().unwrap_or(-1),
+                stderr.lines().next().unwrap_or("unknown error"),
+            );
+        }
+        Err(e) => {
+            eprintln!("[concierge] WARNING: could not run playwright install: {}", e);
+        }
+    }
 }
 
 /// Upgrade the installed package to a specific version (called after self-update).
@@ -181,6 +217,13 @@ pub fn upgrade_package(config: &LauncherConfig, version: &str) -> anyhow::Result
     // Update extras marker so ensure_extras stays in sync after upgrade.
     let extras_val = config.pypi_extra.as_deref().unwrap_or("");
     std::fs::write(&config.extras_file, extras_val)?;
+
+    // Post-upgrade: ensure Playwright browsers if browser extra is included.
+    if let Some(extra) = &config.pypi_extra {
+        if extra.contains("browser") || extra == "all" {
+            ensure_playwright_browsers(config);
+        }
+    }
 
     Ok(())
 }
