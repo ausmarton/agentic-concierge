@@ -14,10 +14,20 @@ from agentic_concierge.config.features import Feature, FeatureDisabledError
 # is_available()
 # ---------------------------------------------------------------------------
 
-def test_is_available_when_playwright_installed():
+def test_is_available_when_playwright_installed_and_browsers_present():
     with patch("agentic_concierge.infrastructure.tools.browser_tool.importlib.util.find_spec",
-               return_value=MagicMock()):
+               return_value=MagicMock()), \
+         patch("agentic_concierge.infrastructure.tools.browser_tool._browsers_installed",
+               return_value=True):
         assert is_available() is True
+
+
+def test_is_available_false_when_browsers_missing():
+    with patch("agentic_concierge.infrastructure.tools.browser_tool.importlib.util.find_spec",
+               return_value=MagicMock()), \
+         patch("agentic_concierge.infrastructure.tools.browser_tool._browsers_installed",
+               return_value=False):
+        assert is_available() is False
 
 
 def test_is_available_when_playwright_absent():

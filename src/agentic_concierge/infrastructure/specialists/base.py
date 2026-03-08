@@ -140,7 +140,7 @@ class BaseSpecialistPack:
                 await self._browser_tool.aopen()
                 self._register_browser_tools()
             except Exception as e:
-                logger.warning("Browser tool unavailable (browsers not installed?): %s", e)
+                logger.debug("Browser tool unavailable: %s", e)
                 self._browser_tool = None
 
     async def aclose(self) -> None:

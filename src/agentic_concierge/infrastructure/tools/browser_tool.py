@@ -33,13 +33,36 @@ logger = logging.getLogger(__name__)
 _TIMEOUT_MS = 30_000
 
 
+def _browsers_installed() -> bool:
+    """Check whether Playwright browser binaries have been downloaded."""
+    try:
+        from playwright._impl._driver import compute_driver_executable
+        driver = Path(compute_driver_executable())
+        # Browsers live in the same parent tree as the driver.
+        registry = driver.parent / ".." / ".." / "driver" / "package" / ".local-browsers"
+        if registry.exists():
+            return True
+        # Fallback: check the standard cache directory.
+        import os
+        cache = Path(os.environ.get(
+            "PLAYWRIGHT_BROWSERS_PATH",
+            Path.home() / ".cache" / "ms-playwright",
+        ))
+        return cache.exists() and any(cache.iterdir())
+    except Exception:
+        return False
+
+
 def is_available() -> bool:
-    """Return ``True`` if the ``playwright`` package is importable.
+    """Return ``True`` if ``playwright`` is importable AND browsers are downloaded.
 
     Uses ``importlib.util.find_spec`` so the module is not actually loaded
-    when checking availability.
+    when checking availability.  Also verifies that browser binaries exist —
+    without them, any launch attempt will fail with a noisy stderr message.
     """
-    return importlib.util.find_spec("playwright") is not None
+    if importlib.util.find_spec("playwright") is None:
+        return False
+    return _browsers_installed()
 
 
 class BrowserTool:
