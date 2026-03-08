@@ -8,6 +8,7 @@ from agentic_concierge.infrastructure.model_profiles import (
     ModelCapabilityProfile,
     _DEFAULT_PROFILE,
     _extract_family,
+    _is_vision_model,
     capability_summary,
     get_profile,
     match_models,
@@ -178,6 +179,54 @@ def test_capability_summary_empty():
 # ---------------------------------------------------------------------------
 # ResolvedLLM.all_chat_models
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Vision model exclusion
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name,expected", [
+    ("qwen3-vl:32b", True),
+    ("llava-vision:7b", True),
+    ("minicpm-v:8b", True),
+    ("qwen2.5:7b", False),
+    ("qwen3:8b", False),
+    ("llama3.1:8b", False),
+    ("qwen2.5-coder:14b", False),
+])
+def test_is_vision_model(name, expected):
+    assert _is_vision_model(name) is expected
+
+
+def test_match_models_excludes_vision_from_tool_calling():
+    """Vision models should be excluded when require_tool_calling=True."""
+    result = match_models(
+        ["qwen2.5:7b", "qwen3-vl:32b"],
+        required_capabilities={"reasoning": 0.7},
+        require_tool_calling=True,
+    )
+    assert result == "qwen2.5:7b"
+
+
+def test_match_models_vision_model_not_selected_as_reviewer():
+    """Reviewer selection should not pick a vision model."""
+    result = match_models(
+        ["qwen2.5:7b", "qwen2.5:32b", "qwen3-vl:32b"],
+        required_capabilities={"reasoning": 0.7, "instruction_following": 0.6},
+        require_tool_calling=True,
+        exclude_models=["qwen2.5:7b"],
+        prefer_smaller=True,
+    )
+    assert result == "qwen2.5:32b"
+
+
+def test_match_models_vision_allowed_when_no_tool_calling_required():
+    """Vision models should be allowed when require_tool_calling=False."""
+    result = match_models(
+        ["qwen3-vl:32b"],
+        require_tool_calling=False,
+    )
+    assert result == "qwen3-vl:32b"
+
 
 def test_resolved_llm_has_all_chat_models():
     from agentic_concierge.infrastructure.llm_discovery import ResolvedLLM

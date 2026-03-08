@@ -208,6 +208,15 @@ _DEFAULT_PROFILE = ModelCapabilityProfile(
 )
 
 
+_VISION_SUFFIXES = ("-vl", "-vision", "-v")
+
+
+def _is_vision_model(model_name: str) -> bool:
+    """Return True if the model name suggests a vision/multimodal variant."""
+    base = model_name.split(":")[0].lower().strip()
+    return any(base.endswith(s) for s in _VISION_SUFFIXES)
+
+
 def _extract_family(model_name: str) -> str:
     """Extract the family prefix from a model name.
 
@@ -292,6 +301,7 @@ def match_models(
         tc_candidates = [
             m for m in candidates
             if get_profile(m, overrides).supports_tool_calling
+            and not _is_vision_model(m)
         ]
         if tc_candidates:
             candidates = tc_candidates

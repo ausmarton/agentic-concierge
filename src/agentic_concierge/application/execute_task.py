@@ -46,6 +46,11 @@ _MAX_PLAIN_TEXT_RETRIES = 2
 # warning so the LLM is forced to re-read the error and try something different.
 _LOOP_DETECT_WINDOW: int = 8
 _LOOP_DETECT_THRESHOLD: int = 2
+# Secondary detector: same tool *name* (ignoring args) repeated this many times
+# in the last _TOOL_NAME_LOOP_WINDOW calls → semantic loop (e.g. web_search with
+# slightly different queries that all return similar results).
+_TOOL_NAME_LOOP_WINDOW: int = 12
+_TOOL_NAME_LOOP_THRESHOLD: int = 8
 
 # Maximum times a reviewer can reject before the work is accepted with a warning.
 _MAX_REVIEW_ITERATIONS: int = 2
@@ -1585,6 +1590,8 @@ async def _execute_pack_loop(
     total_plain_text = 0
     # Repetition detection: sliding window of recent (tool_name, args) signatures.
     tool_call_history: List[str] = []
+    # Secondary: track tool names only for semantic loop detection.
+    tool_name_history: List[str] = []
     # Gate 4: track how many times the reviewer has rejected.
     review_iteration_count = 0
     # Adaptive escalation state (ADR-020).
@@ -2040,6 +2047,14 @@ async def _execute_pack_loop(
                     1 for s in tool_call_history[-_LOOP_DETECT_WINDOW:] if s == _call_sig
                 )
                 tool_call_history.append(_call_sig)
+                # Secondary: detect same tool name with varying args (semantic loop).
+                tool_name_history.append(tc.tool_name)
+                _name_repeats = sum(
+                    1 for n in tool_name_history[-_TOOL_NAME_LOOP_WINDOW:]
+                    if n == tc.tool_name
+                )
+                if _name_repeats >= _TOOL_NAME_LOOP_THRESHOLD and _recent_repeats < _LOOP_DETECT_THRESHOLD:
+                    _recent_repeats = _LOOP_DETECT_THRESHOLD  # promote to loop
 
                 error_type: Optional[str] = None
                 error_message: str = ""
@@ -2131,19 +2146,21 @@ async def _execute_pack_loop(
                             escalation_count += 1
                             escalated_triggers.add("persistent_loop")
                             tool_call_history.clear()  # reset for the new model
+                            tool_name_history.clear()
 
                     _loop_warning = (
-                        f"[SYSTEM] LOOP DETECTED: you have already called '{tc.tool_name}' "
-                        f"with these exact arguments {_recent_repeats} time(s) recently "
-                        "and it has not resolved the problem.\n"
-                        "STOP repeating this action. Instead:\n"
-                        "1. Re-read the error output above and identify the ROOT CAUSE.\n"
-                        "2. Take a DIFFERENT action — fix the code, install a missing "
-                        "dependency with `python -m pip install <pkg>`, or restructure "
-                        "your approach.\n"
-                        "3. If you cannot fix the issue after trying multiple approaches, "
-                        "call finish_task with an explanation of what was attempted and "
-                        "what failed."
+                        f"[SYSTEM] LOOP DETECTED: you have called '{tc.tool_name}' "
+                        f"excessively ({_name_repeats} time(s) in the last "
+                        f"{_TOOL_NAME_LOOP_WINDOW} calls) without meaningful progress.\n"
+                        "STOP repeating this tool. Instead:\n"
+                        "1. Synthesise the information you ALREADY HAVE from previous results.\n"
+                        "2. If results are insufficient, take a DIFFERENT action — use a "
+                        "different tool, change your approach, or try a fundamentally "
+                        "different query.\n"
+                        "3. If you have enough information to answer the question, call "
+                        "finish_task NOW with what you have.\n"
+                        "4. If you truly cannot make progress, call finish_task and explain "
+                        "what was attempted and what failed."
                     )
                     messages.append({"role": "user", "content": _loop_warning})
                     logger.warning(
