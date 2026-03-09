@@ -4,11 +4,15 @@ Wraps the graph executor's ``LeafExecutor`` callback with model assignment:
 each leaf node gets the best model for its inferred agent role, and the
 model handle is released after execution.
 
-See DESIGN_V2.md §9.2 for design rationale.
+Also issues ``preload_hint`` calls for upcoming nodes so models are loaded
+in the background while the current step executes.
+
+See DESIGN_V2.md §9.2 and §7.5 for design rationale.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -17,6 +21,7 @@ from agentic_concierge.application.agent_roles import (
     ModelAssignment,
     assign_model,
     determine_role,
+    get_role,
 )
 from agentic_concierge.application.graph_executor import (
     EventCallback,
@@ -108,11 +113,14 @@ async def execute_graph_with_affinity(
             except Exception:
                 pass
 
-        # 3. Execute
+        # 3. Preload hint for upcoming siblings
+        _issue_preload_hints(node, graph, runtime)
+
+        # 4. Execute
         try:
             return await work_executor(node, graph, assignment)
         finally:
-            # 4. Release handle
+            # 5. Release handle
             try:
                 await runtime.release(assignment.handle)
             except Exception as exc:
@@ -124,3 +132,59 @@ async def execute_graph_with_affinity(
         max_steps=max_steps,
         on_event=on_event,
     )
+
+
+def _issue_preload_hints(
+    current_node: TaskNode,
+    graph: TaskGraph,
+    runtime: Any,
+) -> None:
+    """Fire-and-forget preload hints for nodes likely to execute next.
+
+    Looks at pending siblings that follow the current node.
+    Non-blocking — failures are silently ignored.
+    """
+    if current_node.parent_id is None:
+        return
+    parent = graph.nodes.get(current_node.parent_id)
+    if parent is None:
+        return
+
+    # Find siblings after the current node
+    found_current = False
+    for sib_id in parent.children:
+        if sib_id == current_node.id:
+            found_current = True
+            continue
+        if not found_current:
+            continue
+        sib = graph.nodes.get(sib_id)
+        if sib is None or sib.status != "pending":
+            continue
+        # Issue preload hint
+        role_name = determine_role(sib.required_capabilities)
+        try:
+            role = get_role(role_name)
+            requirements = dict(role.requirements)
+            for cap in sib.required_capabilities:
+                if cap not in requirements:
+                    requirements[cap] = 0.6
+            # Fire and forget — don't await
+            asyncio.ensure_future(_safe_preload(runtime, requirements, role.require_tool_calling))
+        except Exception:
+            pass  # Never let preload hints break execution
+        break  # Only hint for the immediate next sibling
+
+
+async def _safe_preload(
+    runtime: Any,
+    requirements: Dict[str, float],
+    require_tool_calling: bool,
+) -> None:
+    """Safely call preload_hint, catching all exceptions."""
+    try:
+        await runtime.preload_hint(
+            requirements, require_tool_calling=require_tool_calling,
+        )
+    except Exception:
+        pass  # Preload is best-effort

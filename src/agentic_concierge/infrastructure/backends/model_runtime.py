@@ -311,6 +311,79 @@ class LocalModelRuntime:
             )
 
     # -------------------------------------------------------------------
+    # Preloading
+    # -------------------------------------------------------------------
+
+    async def preload_hint(
+        self,
+        requirements: Dict[str, float],
+        *,
+        require_tool_calling: bool = True,
+    ) -> None:
+        """Hint that a model matching *requirements* will be needed soon.
+
+        Non-blocking background loading.  If a matching model is already
+        loaded, this is a no-op.  If memory is available, the model is
+        loaded in the background.  If memory is insufficient, the hint
+        is silently ignored (will evict when ``acquire()`` is called).
+        """
+        async with self._lock:
+            await self._preload_locked(requirements, require_tool_calling)
+
+    async def _preload_locked(
+        self,
+        requirements: Dict[str, float],
+        require_tool_calling: bool,
+    ) -> None:
+        # Check if a matching model is already loaded
+        loaded_ids = list(self._slots.keys())
+        selected = self._select_model(
+            loaded_ids, requirements, require_tool_calling, None,
+        )
+        if selected is not None:
+            logger.debug("preload_hint: model %s already loaded", selected)
+            return
+
+        # Discover available models
+        model_backends = await self._discover_available()
+        all_ids = list(model_backends.keys())
+        selected = self._select_model(
+            all_ids, requirements, require_tool_calling, None,
+        )
+        if selected is None:
+            logger.debug("preload_hint: no model matches requirements %s", requirements)
+            return
+
+        if selected in self._slots:
+            return  # Already loaded (found via a different capability match)
+
+        # Check if we have memory
+        backend = model_backends[selected]
+        try:
+            needed_mb = await backend.estimate_memory(selected)
+        except Exception:
+            needed_mb = 0
+
+        if needed_mb > 0 and self._memory_budget_mb > 0:
+            free = self._memory_budget_mb - self._used_memory_mb
+            if free < needed_mb:
+                logger.debug(
+                    "preload_hint: insufficient memory for %s "
+                    "(%d MB needed, %d MB free); skipping",
+                    selected, needed_mb, free,
+                )
+                return
+
+        # Load in background (non-blocking from caller's perspective)
+        try:
+            slot = await backend.load_model(selected)
+            slot.refcount = 0  # Not acquired yet
+            self._slots[selected] = slot
+            logger.info("preload_hint: preloaded %s (%d MB)", selected, slot.memory_mb)
+        except Exception:
+            logger.debug("preload_hint: failed to preload %s", selected, exc_info=True)
+
+    # -------------------------------------------------------------------
     # Internal helpers
     # -------------------------------------------------------------------
 

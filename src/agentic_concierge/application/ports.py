@@ -151,6 +151,19 @@ class ModelRuntime(Protocol):
         """
         ...
 
+    async def preload_hint(
+        self,
+        requirements: Dict[str, float],
+        *,
+        require_tool_calling: bool = True,
+    ) -> None:
+        """Hint that a model matching *requirements* will be needed soon.
+
+        Non-blocking.  The runtime may preload the model if resources allow.
+        If memory is insufficient, the hint is silently ignored.
+        """
+        ...
+
 
 class SpecialistRegistry(Protocol):
     """Resolve a specialist pack by id."""
