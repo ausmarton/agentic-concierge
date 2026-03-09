@@ -185,7 +185,10 @@ fn ensure_playwright_browsers(config: &LauncherConfig) {
             );
         }
         Err(e) => {
-            eprintln!("[concierge] WARNING: could not run playwright install: {}", e);
+            eprintln!(
+                "[concierge] WARNING: could not run playwright install: {}",
+                e
+            );
         }
     }
 }
