@@ -1,18 +1,22 @@
 """Model capability profiles: scored capabilities per model family.
 
-Replaces the static ``_TOOL_INCAPABLE_NAMES`` blocklist with a richer,
-extensible registry that lets the system reason about what each model
-family is good at (code generation, reasoning, web comprehension, etc.).
+Profiles are loaded from externalized YAML configuration
+(``config/defaults/model_profiles.yaml``) with user overrides from
+``~/.config/concierge/model_profiles.yaml``.  This replaces the former
+hardcoded ``BUILTIN_PROFILES`` dict and the deprecated
+``_TOOL_INCAPABLE_NAMES`` blocklist.
 
-Profiles are loaded from a bundled dict, extensible via config overrides.
 Unknown model families get a permissive default profile.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -28,195 +32,163 @@ class ModelCapabilityProfile:
 
 
 # ---------------------------------------------------------------------------
-# Bundled profiles
+# Profile loading from YAML (with lazy initialisation)
 # ---------------------------------------------------------------------------
 
-BUILTIN_PROFILES: Dict[str, ModelCapabilityProfile] = {
-    "qwen2.5": ModelCapabilityProfile(
-        family="qwen2.5",
-        supports_tool_calling=True,
-        capabilities={
-            "code_python": 0.7, "code_rust": 0.5, "code_sql": 0.6,
-            "reasoning": 0.7, "web_comprehension": 0.6,
-            "summarisation": 0.7, "instruction_following": 0.8,
-            "structured_output": 0.8,
-        },
-    ),
-    "qwen2.5-coder": ModelCapabilityProfile(
-        family="qwen2.5-coder",
-        supports_tool_calling=True,
-        capabilities={
-            "code_python": 0.95, "code_rust": 0.8, "code_sql": 0.85,
-            "reasoning": 0.5, "web_comprehension": 0.3,
-            "summarisation": 0.4, "instruction_following": 0.6,
-            "structured_output": 0.7,
-        },
-    ),
-    "qwen3": ModelCapabilityProfile(
-        family="qwen3",
-        supports_tool_calling=True,
-        capabilities={
-            "code_python": 0.75, "code_rust": 0.6, "code_sql": 0.65,
-            "reasoning": 0.8, "web_comprehension": 0.7,
-            "summarisation": 0.75, "instruction_following": 0.85,
-            "structured_output": 0.8,
-        },
-    ),
-    "qwen3-coder": ModelCapabilityProfile(
-        family="qwen3-coder",
-        supports_tool_calling=True,
-        capabilities={
-            "code_python": 0.95, "code_rust": 0.85, "code_sql": 0.8,
-            "reasoning": 0.5, "web_comprehension": 0.3,
-            "summarisation": 0.4, "instruction_following": 0.7,
-            "structured_output": 0.7,
-        },
-        notes="MoE architecture; 30B total params, ~3-4B active",
-    ),
-    "llama3.1": ModelCapabilityProfile(
-        family="llama3.1",
-        supports_tool_calling=True,
-        capabilities={
-            "code_python": 0.6, "code_rust": 0.4, "code_sql": 0.5,
-            "reasoning": 0.7, "web_comprehension": 0.6,
-            "summarisation": 0.7, "instruction_following": 0.7,
-            "structured_output": 0.7,
-        },
-    ),
-    "phi-4-mini": ModelCapabilityProfile(
-        family="phi-4-mini",
-        supports_tool_calling=True,
-        capabilities={
-            "code_python": 0.6, "code_rust": 0.4, "code_sql": 0.5,
-            "reasoning": 0.85, "web_comprehension": 0.5,
-            "summarisation": 0.6, "instruction_following": 0.7,
-            "structured_output": 0.7,
-        },
-        notes="Strong reasoning despite small size.",
-    ),
-    "deepseek-r1-distill": ModelCapabilityProfile(
-        family="deepseek-r1-distill",
-        supports_tool_calling=True,
-        capabilities={
-            "code_python": 0.6, "code_rust": 0.4, "code_sql": 0.5,
-            "reasoning": 0.9, "web_comprehension": 0.4,
-            "summarisation": 0.5, "instruction_following": 0.5,
-            "structured_output": 0.5,
-        },
-        notes="Reasoning-first model; may struggle with structured output.",
-    ),
-    "sqlcoder": ModelCapabilityProfile(
-        family="sqlcoder",
-        supports_tool_calling=False,
-        capabilities={
-            "code_python": 0.3, "code_rust": 0.1, "code_sql": 0.95,
-            "reasoning": 0.3, "web_comprehension": 0.0,
-            "summarisation": 0.2, "instruction_following": 0.3,
-            "structured_output": 0.2,
-        },
-    ),
-    "deepseek-coder": ModelCapabilityProfile(
-        family="deepseek-coder",
-        supports_tool_calling=False,
-        capabilities={
-            "code_python": 0.9, "code_rust": 0.7, "code_sql": 0.7,
-            "reasoning": 0.4, "web_comprehension": 0.1,
-            "summarisation": 0.3, "instruction_following": 0.4,
-            "structured_output": 0.3,
-        },
-    ),
-    "codellama": ModelCapabilityProfile(
-        family="codellama",
-        supports_tool_calling=False,
-        capabilities={
-            "code_python": 0.85, "code_rust": 0.6, "code_sql": 0.6,
-            "reasoning": 0.3, "web_comprehension": 0.0,
-            "summarisation": 0.2, "instruction_following": 0.3,
-            "structured_output": 0.3,
-        },
-    ),
-    "gemma2": ModelCapabilityProfile(
-        family="gemma2",
-        supports_tool_calling=True,
-        capabilities={
-            "code_python": 0.5, "code_rust": 0.3, "code_sql": 0.4,
-            "reasoning": 0.6, "web_comprehension": 0.5,
-            "summarisation": 0.6, "instruction_following": 0.6,
-            "structured_output": 0.6,
-        },
-    ),
-    "starcoder": ModelCapabilityProfile(
-        family="starcoder",
-        supports_tool_calling=False,
-        capabilities={
-            "code_python": 0.8, "code_rust": 0.5, "code_sql": 0.6,
-            "reasoning": 0.2, "web_comprehension": 0.0,
-            "summarisation": 0.1, "instruction_following": 0.2,
-            "structured_output": 0.2,
-        },
-    ),
-    "starcoder2": ModelCapabilityProfile(
-        family="starcoder2",
-        supports_tool_calling=False,
-        capabilities={
-            "code_python": 0.85, "code_rust": 0.6, "code_sql": 0.65,
-            "reasoning": 0.3, "web_comprehension": 0.0,
-            "summarisation": 0.2, "instruction_following": 0.3,
-            "structured_output": 0.2,
-        },
-    ),
-    "stable-code": ModelCapabilityProfile(
-        family="stable-code",
-        supports_tool_calling=False,
-        capabilities={
-            "code_python": 0.7, "code_rust": 0.4, "code_sql": 0.5,
-            "reasoning": 0.3, "web_comprehension": 0.0,
-            "summarisation": 0.2, "instruction_following": 0.3,
-            "structured_output": 0.2,
-        },
-    ),
-    "magicoder": ModelCapabilityProfile(
-        family="magicoder",
-        supports_tool_calling=False,
-        capabilities={
-            "code_python": 0.8, "code_rust": 0.5, "code_sql": 0.5,
-            "reasoning": 0.3, "web_comprehension": 0.0,
-            "summarisation": 0.2, "instruction_following": 0.3,
-            "structured_output": 0.2,
-        },
-    ),
-    "phind-codellama": ModelCapabilityProfile(
-        family="phind-codellama",
-        supports_tool_calling=False,
-        capabilities={
-            "code_python": 0.85, "code_rust": 0.6, "code_sql": 0.6,
-            "reasoning": 0.4, "web_comprehension": 0.1,
-            "summarisation": 0.3, "instruction_following": 0.4,
-            "structured_output": 0.3,
-        },
-    ),
-    "wizardcoder": ModelCapabilityProfile(
-        family="wizardcoder",
-        supports_tool_calling=False,
-        capabilities={
-            "code_python": 0.8, "code_rust": 0.5, "code_sql": 0.5,
-            "reasoning": 0.3, "web_comprehension": 0.0,
-            "summarisation": 0.2, "instruction_following": 0.3,
-            "structured_output": 0.2,
-        },
-    ),
-}
+# Module-level cache: populated on first call to _loaded_profiles().
+_profiles_cache: Optional[Dict[str, ModelCapabilityProfile]] = None
+_default_profile_cache: Optional[ModelCapabilityProfile] = None
 
-_DEFAULT_PROFILE = ModelCapabilityProfile(
-    family="unknown",
-    supports_tool_calling=True,
-    capabilities={
-        "code_python": 0.5, "code_rust": 0.3, "code_sql": 0.4,
-        "reasoning": 0.5, "web_comprehension": 0.5,
-        "summarisation": 0.5, "instruction_following": 0.5,
-        "structured_output": 0.5,
-    },
-)
+
+def _profile_from_dict(family: str, data: Dict) -> ModelCapabilityProfile:
+    """Construct a ``ModelCapabilityProfile`` from a YAML dict entry."""
+    return ModelCapabilityProfile(
+        family=family,
+        supports_tool_calling=bool(data.get("supports_tool_calling", True)),
+        capabilities={
+            str(k): float(v)
+            for k, v in data.get("capabilities", {}).items()
+        },
+        min_size_b=float(data.get("min_size_b", 0.0)),
+        max_size_b=float(data.get("max_size_b", 999.0)),
+        notes=str(data.get("notes", "")),
+    )
+
+
+def _load_profiles() -> tuple[Dict[str, ModelCapabilityProfile], ModelCapabilityProfile]:
+    """Load profiles from YAML config hierarchy.
+
+    Returns (profiles_dict, default_profile).
+    """
+    from agentic_concierge.config.external import load_yaml_config
+
+    data = load_yaml_config("model_profiles.yaml")
+    profiles: Dict[str, ModelCapabilityProfile] = {}
+
+    for family, entry in data.get("profiles", {}).items():
+        if isinstance(entry, dict):
+            profiles[family] = _profile_from_dict(family, entry)
+
+    # Default profile for unknown families
+    default_data = data.get("default_profile", {})
+    if default_data and isinstance(default_data, dict):
+        default_profile = _profile_from_dict("unknown", default_data)
+    else:
+        # Hardcoded fallback if YAML is missing entirely
+        default_profile = ModelCapabilityProfile(
+            family="unknown",
+            supports_tool_calling=True,
+            capabilities={
+                "code_python": 0.5, "code_rust": 0.3, "code_sql": 0.4,
+                "reasoning": 0.5, "web_comprehension": 0.5,
+                "summarisation": 0.5, "instruction_following": 0.5,
+                "structured_output": 0.5,
+            },
+        )
+
+    return profiles, default_profile
+
+
+def _loaded_profiles() -> Dict[str, ModelCapabilityProfile]:
+    """Return the lazily-loaded profiles dict."""
+    global _profiles_cache, _default_profile_cache
+    if _profiles_cache is None:
+        _profiles_cache, _default_profile_cache = _load_profiles()
+    return _profiles_cache
+
+
+def _loaded_default_profile() -> ModelCapabilityProfile:
+    """Return the lazily-loaded default profile."""
+    global _profiles_cache, _default_profile_cache
+    if _default_profile_cache is None:
+        _profiles_cache, _default_profile_cache = _load_profiles()
+    return _default_profile_cache
+
+
+def reload_profiles() -> None:
+    """Force re-read of profiles from YAML.  Useful after config changes in tests."""
+    global _profiles_cache, _default_profile_cache
+    _profiles_cache = None
+    _default_profile_cache = None
+
+
+# Public alias for backward compatibility — code that imports BUILTIN_PROFILES
+# will get a dict populated from YAML.  Note: this is a snapshot at import time;
+# code should prefer calling _loaded_profiles() for live data.
+@property  # type: ignore[misc]
+def _builtin_profiles_property() -> Dict[str, ModelCapabilityProfile]:
+    return _loaded_profiles()
+
+
+class _BuiltinProfilesAccessor:
+    """Lazy accessor that behaves like a dict but loads from YAML on first access.
+
+    This allows ``BUILTIN_PROFILES["qwen2.5"]`` to work while loading profiles
+    lazily from YAML.  It also supports iteration, ``in``, ``len()``, etc.
+    """
+
+    def __getitem__(self, key: str) -> ModelCapabilityProfile:
+        return _loaded_profiles()[key]
+
+    def __contains__(self, key: object) -> bool:
+        return key in _loaded_profiles()
+
+    def __iter__(self):
+        return iter(_loaded_profiles())
+
+    def __len__(self) -> int:
+        return len(_loaded_profiles())
+
+    def keys(self):
+        return _loaded_profiles().keys()
+
+    def values(self):
+        return _loaded_profiles().values()
+
+    def items(self):
+        return _loaded_profiles().items()
+
+    def get(self, key: str, default=None):
+        return _loaded_profiles().get(key, default)
+
+    def __repr__(self) -> str:
+        return repr(_loaded_profiles())
+
+
+BUILTIN_PROFILES: _BuiltinProfilesAccessor = _BuiltinProfilesAccessor()  # type: ignore[assignment]
+
+
+# Backward-compatible alias — code that imports _DEFAULT_PROFILE will get
+# a lazy reference to the default profile loaded from YAML.
+class _DefaultProfileAccessor:
+    """Lazy accessor that returns the YAML-loaded default profile."""
+
+    @property
+    def family(self) -> str:
+        return _loaded_default_profile().family
+
+    @property
+    def supports_tool_calling(self) -> bool:
+        return _loaded_default_profile().supports_tool_calling
+
+    @property
+    def capabilities(self) -> Dict[str, float]:
+        return _loaded_default_profile().capabilities
+
+    @property
+    def min_size_b(self) -> float:
+        return _loaded_default_profile().min_size_b
+
+    @property
+    def max_size_b(self) -> float:
+        return _loaded_default_profile().max_size_b
+
+    @property
+    def notes(self) -> str:
+        return _loaded_default_profile().notes
+
+
+_DEFAULT_PROFILE: _DefaultProfileAccessor = _DefaultProfileAccessor()  # type: ignore[assignment]
 
 
 _VISION_SUFFIXES = ("-vl", "-vision", "-v")
@@ -251,8 +223,8 @@ def get_profile(
     """Look up the capability profile for a model name.
 
     Resolution order:
-    1. User-supplied overrides (exact family match).
-    2. Builtin profiles (longest prefix match to handle families like
+    1. User-supplied code overrides (exact family match).
+    2. YAML-loaded profiles (longest prefix match to handle families like
        ``qwen2.5-coder`` vs ``qwen2.5``).
     3. Default permissive profile.
     """
@@ -263,16 +235,17 @@ def get_profile(
             return overrides[family]
 
     # Longest prefix match: "qwen2.5-coder" should match before "qwen2.5"
+    profiles = _loaded_profiles()
     best_match: Optional[str] = None
-    for profile_family in BUILTIN_PROFILES:
+    for profile_family in profiles:
         if family.startswith(profile_family):
             if best_match is None or len(profile_family) > len(best_match):
                 best_match = profile_family
 
     if best_match is not None:
-        return BUILTIN_PROFILES[best_match]
+        return profiles[best_match]
 
-    return _DEFAULT_PROFILE
+    return _loaded_default_profile()
 
 
 def match_models(

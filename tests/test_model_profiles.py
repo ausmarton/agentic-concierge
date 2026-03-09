@@ -17,6 +17,7 @@ from agentic_concierge.infrastructure.model_profiles import (
     get_profile,
     infer_finish_schema_from_capabilities,
     match_models,
+    reload_profiles,
 )
 
 
@@ -78,9 +79,15 @@ def test_get_profile_user_override():
 # ---------------------------------------------------------------------------
 
 def test_tool_incapable_models_have_profiles():
-    """Every model in the old _TOOL_INCAPABLE_NAMES must have a profile with supports_tool_calling=False."""
-    from agentic_concierge.infrastructure.llm_discovery import _TOOL_INCAPABLE_NAMES
-    for name in _TOOL_INCAPABLE_NAMES:
+    """Known non-tool-calling models must have profiles with supports_tool_calling=False."""
+    # These models were in the deprecated _TOOL_INCAPABLE_NAMES blocklist (now removed).
+    # The invariant remains: their profiles must declare supports_tool_calling=False.
+    _KNOWN_NON_TC_FAMILIES = [
+        "sqlcoder", "codellama", "starcoder", "starcoder2",
+        "deepseek-coder", "stable-code", "magicoder",
+        "phind-codellama", "wizardcoder",
+    ]
+    for name in _KNOWN_NON_TC_FAMILIES:
         profile = get_profile(name)
         assert profile.supports_tool_calling is False, (
             f"Expected {name} to be tool-incapable but profile says tool_calling=True"
@@ -422,3 +429,133 @@ def test_qwen3_coder_selected_for_code_task():
         required_capabilities={"code_python": 0.8},
     )
     assert result == "qwen3-coder:30b"
+
+
+# ---------------------------------------------------------------------------
+# YAML-loaded profiles (Issue #8)
+# ---------------------------------------------------------------------------
+
+
+class TestYamlLoadedProfiles:
+    """Tests that profiles are loaded from YAML and that overrides work."""
+
+    def test_profiles_loaded_from_yaml(self):
+        """BUILTIN_PROFILES should contain entries loaded from YAML defaults."""
+        assert "qwen2.5" in BUILTIN_PROFILES
+        assert "sqlcoder" in BUILTIN_PROFILES
+        assert len(BUILTIN_PROFILES) >= 18  # at least the original 17 + new families
+
+    def test_new_model_families_available(self):
+        """New March 2026 model families should be in shipped profiles."""
+        assert "qwen3.5" in BUILTIN_PROFILES
+        assert "phi-4-reasoning" in BUILTIN_PROFILES
+        assert "xlam-2" in BUILTIN_PROFILES
+        assert "glm-4.7-flash" in BUILTIN_PROFILES
+        assert "nemotron-3-nano" in BUILTIN_PROFILES
+        assert "qwen3-coder-next" in BUILTIN_PROFILES
+
+    def test_qwen3_5_profile(self):
+        """Qwen3.5-9B should have high reasoning and structured_output."""
+        p = get_profile("qwen3.5:9b")
+        assert p.family == "qwen3.5"
+        assert p.capabilities["reasoning"] >= 0.85
+        assert p.capabilities["structured_output"] >= 0.8
+        assert p.supports_tool_calling is True
+
+    def test_phi_4_reasoning_profile(self):
+        """Phi-4-reasoning should have very high reasoning score."""
+        p = get_profile("phi-4-reasoning:14b")
+        assert p.family == "phi-4-reasoning"
+        assert p.capabilities["reasoning"] >= 0.9
+        assert p.supports_tool_calling is True
+
+    def test_xlam_2_function_calling_specialist(self):
+        """xLAM-2 should excel at instruction_following and structured_output."""
+        p = get_profile("xlam-2:8b")
+        assert p.family == "xlam-2"
+        assert p.capabilities["instruction_following"] >= 0.9
+        assert p.capabilities["structured_output"] >= 0.9
+        assert p.supports_tool_calling is True
+
+    def test_user_yaml_override(self, monkeypatch, tmp_path):
+        """User YAML override should change a profile's values."""
+        import yaml
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        user_dir = tmp_path / "concierge"
+        user_dir.mkdir(parents=True)
+
+        # Override qwen2.5's reasoning score
+        user_profiles = {
+            "profiles": {
+                "qwen2.5": {
+                    "supports_tool_calling": True,
+                    "capabilities": {
+                        "code_python": 0.7,
+                        "reasoning": 0.99,  # overridden to 0.99
+                    },
+                },
+            },
+        }
+        (user_dir / "model_profiles.yaml").write_text(yaml.dump(user_profiles))
+
+        # Force reload to pick up the override
+        reload_profiles()
+        try:
+            p = get_profile("qwen2.5:7b")
+            assert p.capabilities["reasoning"] == 0.99
+        finally:
+            # Restore original profiles for other tests
+            reload_profiles()
+
+    def test_backward_compat_values_match(self):
+        """Original 17 families should have the same values as the old Python dict."""
+        # Spot-check a few representative families
+        p = get_profile("qwen2.5:7b")
+        assert p.capabilities["code_python"] == 0.7
+        assert p.capabilities["structured_output"] == 0.8
+
+        p = get_profile("sqlcoder:15b")
+        assert p.capabilities["code_sql"] == 0.95
+        assert p.supports_tool_calling is False
+
+        p = get_profile("phi-4-mini:latest")
+        assert p.capabilities["reasoning"] == 0.85
+
+    def test_reload_profiles_clears_cache(self, monkeypatch, tmp_path):
+        """reload_profiles() should force re-read from YAML."""
+        import yaml
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+        # First load: no user config → shipped defaults
+        reload_profiles()
+        p1 = get_profile("qwen2.5:7b")
+        assert p1.capabilities["code_python"] == 0.7
+
+        # Now create a user override
+        user_dir = tmp_path / "concierge"
+        user_dir.mkdir(parents=True)
+        user_profiles = {
+            "profiles": {
+                "qwen2.5": {
+                    "supports_tool_calling": True,
+                    "capabilities": {"code_python": 0.42},
+                },
+            },
+        }
+        (user_dir / "model_profiles.yaml").write_text(yaml.dump(user_profiles))
+
+        # Without reload, cached value persists (old value still in cache)
+        # After reload, new value is picked up
+        reload_profiles()
+        try:
+            p3 = get_profile("qwen2.5:7b")
+            assert p3.capabilities["code_python"] == 0.42
+        finally:
+            reload_profiles()
+
+    def test_unknown_family_gets_default(self):
+        """An unknown model family should get the default permissive profile."""
+        p = get_profile("totally-unknown-model:7b")
+        assert p.family == "unknown"
+        assert p.supports_tool_calling is True
+        assert p.capabilities["reasoning"] == 0.5

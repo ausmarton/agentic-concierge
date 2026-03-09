@@ -1,0 +1,336 @@
+# Model capability profiles — shipped defaults.
+#
+# Override by placing a model_profiles.yaml in ~/.config/concierge/
+# or by setting CONCIERGE_MODEL_PROFILES_PATH to a custom file.
+#
+# Only the profiles you specify in overrides are merged; all other
+# profiles remain at their shipped default values.
+#
+# Capability scores range from 0.0 (no capability) to 1.0 (best-in-class).
+# supports_tool_calling: whether the model can produce OpenAI-style function calls.
+
+profiles_version: 1
+
+profiles:
+  # -----------------------------------------------------------------------
+  # Qwen family
+  # -----------------------------------------------------------------------
+  qwen2.5:
+    supports_tool_calling: true
+    capabilities:
+      code_python: 0.7
+      code_rust: 0.5
+      code_sql: 0.6
+      reasoning: 0.7
+      web_comprehension: 0.6
+      summarisation: 0.7
+      instruction_following: 0.8
+      structured_output: 0.8
+
+  qwen2.5-coder:
+    supports_tool_calling: true
+    capabilities:
+      code_python: 0.95
+      code_rust: 0.8
+      code_sql: 0.85
+      reasoning: 0.5
+      web_comprehension: 0.3
+      summarisation: 0.4
+      instruction_following: 0.6
+      structured_output: 0.7
+
+  qwen3:
+    supports_tool_calling: true
+    capabilities:
+      code_python: 0.75
+      code_rust: 0.6
+      code_sql: 0.65
+      reasoning: 0.8
+      web_comprehension: 0.7
+      summarisation: 0.75
+      instruction_following: 0.85
+      structured_output: 0.8
+
+  qwen3-coder:
+    supports_tool_calling: true
+    capabilities:
+      code_python: 0.95
+      code_rust: 0.85
+      code_sql: 0.8
+      reasoning: 0.5
+      web_comprehension: 0.3
+      summarisation: 0.4
+      instruction_following: 0.7
+      structured_output: 0.7
+    notes: "MoE architecture; 30B total params, ~3-4B active"
+
+  qwen3.5:
+    supports_tool_calling: true
+    capabilities:
+      code_python: 0.85
+      code_rust: 0.7
+      code_sql: 0.7
+      reasoning: 0.9
+      web_comprehension: 0.8
+      summarisation: 0.8
+      instruction_following: 0.85
+      structured_output: 0.85
+    notes: "Qwen3.5-9B: 66.1 BFCL-V4, 79.1 TAU2, 81.7 GPQA Diamond; beats GPT-OSS-120B on reasoning"
+
+  qwen3-coder-next:
+    supports_tool_calling: true
+    capabilities:
+      code_python: 0.95
+      code_rust: 0.9
+      code_sql: 0.85
+      reasoning: 0.6
+      web_comprehension: 0.3
+      summarisation: 0.4
+      instruction_following: 0.75
+      structured_output: 0.75
+    notes: "80B/3B MoE (512 experts); SWE-Bench-Pro competitive"
+
+  # -----------------------------------------------------------------------
+  # Meta family
+  # -----------------------------------------------------------------------
+  llama3.1:
+    supports_tool_calling: true
+    capabilities:
+      code_python: 0.6
+      code_rust: 0.4
+      code_sql: 0.5
+      reasoning: 0.7
+      web_comprehension: 0.6
+      summarisation: 0.7
+      instruction_following: 0.7
+      structured_output: 0.7
+
+  # -----------------------------------------------------------------------
+  # Microsoft family
+  # -----------------------------------------------------------------------
+  phi-4-mini:
+    supports_tool_calling: true
+    capabilities:
+      code_python: 0.6
+      code_rust: 0.4
+      code_sql: 0.5
+      reasoning: 0.85
+      web_comprehension: 0.5
+      summarisation: 0.6
+      instruction_following: 0.7
+      structured_output: 0.7
+    notes: "Strong reasoning despite small size."
+
+  phi-4-reasoning:
+    supports_tool_calling: true
+    capabilities:
+      code_python: 0.7
+      code_rust: 0.5
+      code_sql: 0.6
+      reasoning: 0.95
+      web_comprehension: 0.5
+      summarisation: 0.65
+      instruction_following: 0.85
+      structured_output: 0.8
+    notes: "14B; approaches full DeepSeek R1 (671B); outperforms R1-Distill-70B"
+
+  # -----------------------------------------------------------------------
+  # DeepSeek family
+  # -----------------------------------------------------------------------
+  deepseek-r1-distill:
+    supports_tool_calling: true
+    capabilities:
+      code_python: 0.6
+      code_rust: 0.4
+      code_sql: 0.5
+      reasoning: 0.9
+      web_comprehension: 0.4
+      summarisation: 0.5
+      instruction_following: 0.5
+      structured_output: 0.5
+    notes: "Reasoning-first model; may struggle with structured output."
+
+  deepseek-coder:
+    supports_tool_calling: false
+    capabilities:
+      code_python: 0.9
+      code_rust: 0.7
+      code_sql: 0.7
+      reasoning: 0.4
+      web_comprehension: 0.1
+      summarisation: 0.3
+      instruction_following: 0.4
+      structured_output: 0.3
+
+  # -----------------------------------------------------------------------
+  # Google family
+  # -----------------------------------------------------------------------
+  gemma2:
+    supports_tool_calling: true
+    capabilities:
+      code_python: 0.5
+      code_rust: 0.3
+      code_sql: 0.4
+      reasoning: 0.6
+      web_comprehension: 0.5
+      summarisation: 0.6
+      instruction_following: 0.6
+      structured_output: 0.6
+
+  # -----------------------------------------------------------------------
+  # Salesforce family
+  # -----------------------------------------------------------------------
+  xlam-2:
+    supports_tool_calling: true
+    capabilities:
+      code_python: 0.5
+      code_rust: 0.3
+      code_sql: 0.4
+      reasoning: 0.6
+      web_comprehension: 0.5
+      summarisation: 0.5
+      instruction_following: 0.95
+      structured_output: 0.95
+    notes: "xLAM-2-8b-fc-r: SOTA function calling; outperforms GPT-4o on BFCL-V4"
+
+  # -----------------------------------------------------------------------
+  # Specialist code models (no tool calling)
+  # -----------------------------------------------------------------------
+  sqlcoder:
+    supports_tool_calling: false
+    capabilities:
+      code_python: 0.3
+      code_rust: 0.1
+      code_sql: 0.95
+      reasoning: 0.3
+      web_comprehension: 0.0
+      summarisation: 0.2
+      instruction_following: 0.3
+      structured_output: 0.2
+
+  codellama:
+    supports_tool_calling: false
+    capabilities:
+      code_python: 0.85
+      code_rust: 0.6
+      code_sql: 0.6
+      reasoning: 0.3
+      web_comprehension: 0.0
+      summarisation: 0.2
+      instruction_following: 0.3
+      structured_output: 0.3
+
+  starcoder:
+    supports_tool_calling: false
+    capabilities:
+      code_python: 0.8
+      code_rust: 0.5
+      code_sql: 0.6
+      reasoning: 0.2
+      web_comprehension: 0.0
+      summarisation: 0.1
+      instruction_following: 0.2
+      structured_output: 0.2
+
+  starcoder2:
+    supports_tool_calling: false
+    capabilities:
+      code_python: 0.85
+      code_rust: 0.6
+      code_sql: 0.65
+      reasoning: 0.3
+      web_comprehension: 0.0
+      summarisation: 0.2
+      instruction_following: 0.3
+      structured_output: 0.2
+
+  stable-code:
+    supports_tool_calling: false
+    capabilities:
+      code_python: 0.7
+      code_rust: 0.4
+      code_sql: 0.5
+      reasoning: 0.3
+      web_comprehension: 0.0
+      summarisation: 0.2
+      instruction_following: 0.3
+      structured_output: 0.2
+
+  magicoder:
+    supports_tool_calling: false
+    capabilities:
+      code_python: 0.8
+      code_rust: 0.5
+      code_sql: 0.5
+      reasoning: 0.3
+      web_comprehension: 0.0
+      summarisation: 0.2
+      instruction_following: 0.3
+      structured_output: 0.2
+
+  phind-codellama:
+    supports_tool_calling: false
+    capabilities:
+      code_python: 0.85
+      code_rust: 0.6
+      code_sql: 0.6
+      reasoning: 0.4
+      web_comprehension: 0.1
+      summarisation: 0.3
+      instruction_following: 0.4
+      structured_output: 0.3
+
+  wizardcoder:
+    supports_tool_calling: false
+    capabilities:
+      code_python: 0.8
+      code_rust: 0.5
+      code_sql: 0.5
+      reasoning: 0.3
+      web_comprehension: 0.0
+      summarisation: 0.2
+      instruction_following: 0.3
+      structured_output: 0.2
+
+  # -----------------------------------------------------------------------
+  # New models (March 2026)
+  # -----------------------------------------------------------------------
+  glm-4.7-flash:
+    supports_tool_calling: true
+    capabilities:
+      code_python: 0.7
+      code_rust: 0.5
+      code_sql: 0.6
+      reasoning: 0.85
+      web_comprehension: 0.7
+      summarisation: 0.75
+      instruction_following: 0.8
+      structured_output: 0.8
+    notes: "Zhipu AI; 30B/3B MoE; interleaved thinking; 87.4 tau2-Bench"
+
+  nemotron-3-nano:
+    supports_tool_calling: true
+    capabilities:
+      code_python: 0.6
+      code_rust: 0.4
+      code_sql: 0.5
+      reasoning: 0.7
+      web_comprehension: 0.5
+      summarisation: 0.6
+      instruction_following: 0.7
+      structured_output: 0.7
+    notes: "NVIDIA; 30B/3B hybrid Mamba-Transformer MoE; 1M context"
+
+# Default profile for unknown model families.
+# Applied when no profile matches the model name.
+default_profile:
+  supports_tool_calling: true
+  capabilities:
+    code_python: 0.5
+    code_rust: 0.3
+    code_sql: 0.4
+    reasoning: 0.5
+    web_comprehension: 0.5
+    summarisation: 0.5
+    instruction_following: 0.5
+    structured_output: 0.5

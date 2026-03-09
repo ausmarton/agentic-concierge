@@ -107,24 +107,6 @@ _EMBEDDING_ONLY_FAMILIES_OR_NAMES = frozenset(
     )
 )
 
-# Models that can chat but do NOT support OpenAI-style tool calling.
-# DEPRECATED: retained for backward-compatible imports.  The authoritative
-# source is now ``infrastructure.model_profiles.get_profile(...).supports_tool_calling``.
-_TOOL_INCAPABLE_NAMES = frozenset(
-    s.lower()
-    for s in (
-        "sqlcoder",
-        "codellama",
-        "starcoder",
-        "starcoder2",
-        "deepseek-coder",
-        "stable-code",
-        "magicoder",
-        "phind-codellama",
-        "wizardcoder",
-    )
-)
-
 
 def _is_ollama_chat_capable(m: dict) -> bool:
     """True if this Ollama model is suitable for chat/completion (exclude embedding-only)."""
