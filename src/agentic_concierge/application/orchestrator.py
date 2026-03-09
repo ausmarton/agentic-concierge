@@ -220,7 +220,7 @@ def _resolve_pack_from_capabilities(
         generate_role_from_capabilities,
         infer_finish_schema_from_capabilities,
     )
-    from agentic_concierge.infrastructure.specialists.dynamic_pack import PACK_TEMPLATES
+    from agentic_concierge.infrastructure.specialists.dynamic_pack import pack_templates
 
     composed_tools = compose_tools_from_capabilities(required_capabilities)
     composed_set = set(composed_tools)
@@ -232,7 +232,7 @@ def _resolve_pack_from_capabilities(
         return ("research", None, None, "quick_answer")
 
     # Check if any template's tool set matches exactly.
-    for tid, tpl in PACK_TEMPLATES.items():
+    for tid, tpl in pack_templates().items():
         if set(tpl.tool_names) == composed_set:
             return (tid, None, None, None)
 
@@ -323,12 +323,13 @@ def _collapse_redundant_dynamic(
     if len(assignments) <= 1:
         return assignments
 
-    from agentic_concierge.infrastructure.specialists.dynamic_pack import PACK_TEMPLATES
+    from agentic_concierge.infrastructure.specialists.dynamic_pack import pack_templates
 
     # Collect template IDs already in the plan
     template_ids_present = {
         a.specialist_id for a in assignments if a.specialist_id != "dynamic"
     }
+    templates = pack_templates()
 
     result: List[SpecialistBrief] = []
     for a in assignments:
@@ -340,7 +341,7 @@ def _collapse_redundant_dynamic(
         # Only collapse into a template that's already in the plan
         matched_template: Optional[str] = None
         for tid in template_ids_present:
-            tpl = PACK_TEMPLATES.get(tid)
+            tpl = templates.get(tid)
             if tpl and tool_set <= set(tpl.tool_names):
                 matched_template = tid
                 break
@@ -466,8 +467,8 @@ async def orchestrate_task(
 
     # Validate assignments: known template IDs or "dynamic" with tools
     known_ids = set(config.specialists.keys())
-    from agentic_concierge.infrastructure.specialists.dynamic_pack import PACK_TEMPLATES
-    known_templates = set(PACK_TEMPLATES.keys())
+    from agentic_concierge.infrastructure.specialists.dynamic_pack import pack_templates
+    known_templates = set(pack_templates().keys())
 
     assignments: List[SpecialistBrief] = []
     from agentic_concierge.infrastructure.specialists.finish_schemas import FINISH_SCHEMA_KEYS
@@ -589,11 +590,11 @@ def _template_fallback_plan(
     config: ConciergeConfig,
 ) -> OrchestrationPlan:
     """Fall back to the first available template specialist."""
-    from agentic_concierge.infrastructure.specialists.dynamic_pack import PACK_TEMPLATES
+    from agentic_concierge.infrastructure.specialists.dynamic_pack import pack_templates
 
     # Use first template that exists in config.
     # Default to "fast" model — adaptive escalation will upgrade if needed.
-    for tid in PACK_TEMPLATES:
+    for tid in pack_templates():
         if tid in config.specialists:
             logger.info("Template fallback: using %r", tid)
             return OrchestrationPlan(

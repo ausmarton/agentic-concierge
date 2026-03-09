@@ -4,12 +4,13 @@
 runtime.  It looks up tools in the :mod:`tool_catalog`, creates executors bound
 to the workspace, and assembles a system prompt from the role description.
 
-``PackTemplate`` and ``PACK_TEMPLATES`` provide data-driven replacements for the
-three legacy builder functions (engineering, research, enterprise_research).
+Templates are loaded from YAML files in ``config/defaults/templates/`` with
+user override support via ``~/.config/concierge/templates/``.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -22,22 +23,16 @@ from .finish_schemas import (
     get_finish_schema,
 )
 from .prompts import (
-    ROLE_ENGINEERING,
-    ROLE_ENTERPRISE_RESEARCH,
-    ROLE_RESEARCH,
+    ROLE_DESCRIPTIONS,
     generate_system_prompt,
 )
 from .tool_catalog import TOOL_CATALOG, get_tool
 
-# Backward-compatible aliases — some tests import these directly.
-_ENGINEERING_FINISH_SCHEMA = FINISH_SCHEMAS["code"]
-_RESEARCH_FINISH_SCHEMA = FINISH_SCHEMAS["research_report"]
-_ENTERPRISE_RESEARCH_FINISH_SCHEMA = FINISH_SCHEMAS["enterprise_report"]
-_DEFAULT_FINISH_SCHEMA = FINISH_SCHEMAS["general"]
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Pack templates
+# Pack templates — loaded from YAML
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -51,27 +46,117 @@ class PackTemplate:
     quality_gates: List[str] = field(default_factory=list)
 
 
-PACK_TEMPLATES: Dict[str, PackTemplate] = {
-    "engineering": PackTemplate(
-        template_id="engineering",
-        tool_names=["shell", "read_file", "write_file", "list_files", "run_tests"],
-        role_description=ROLE_ENGINEERING,
-        finish_schema=_ENGINEERING_FINISH_SCHEMA,
-        quality_gates=["tests_verified"],
-    ),
-    "research": PackTemplate(
-        template_id="research",
-        tool_names=["web_search", "fetch_url", "read_file", "list_files"],
-        role_description=ROLE_RESEARCH,
-        finish_schema=FINISH_SCHEMAS["quick_answer"],
-    ),
-    "enterprise_research": PackTemplate(
-        template_id="enterprise_research",
-        tool_names=["cross_run_search", "web_search", "fetch_url", "write_file", "read_file", "list_files"],
-        role_description=ROLE_ENTERPRISE_RESEARCH,
-        finish_schema=_ENTERPRISE_RESEARCH_FINISH_SCHEMA,
-    ),
-}
+# Hardcoded fallback — used only when YAML cannot be loaded.
+def _fallback_templates() -> Dict[str, PackTemplate]:
+    return {
+        "engineering": PackTemplate(
+            template_id="engineering",
+            tool_names=["shell", "read_file", "write_file", "list_files", "run_tests"],
+            role_description=ROLE_DESCRIPTIONS["engineering"],
+            finish_schema=FINISH_SCHEMAS["code"],
+            quality_gates=["tests_verified"],
+        ),
+        "research": PackTemplate(
+            template_id="research",
+            tool_names=["web_search", "fetch_url", "read_file", "list_files"],
+            role_description=ROLE_DESCRIPTIONS["research"],
+            finish_schema=FINISH_SCHEMAS["quick_answer"],
+        ),
+        "enterprise_research": PackTemplate(
+            template_id="enterprise_research",
+            tool_names=["cross_run_search", "web_search", "fetch_url", "write_file", "read_file", "list_files"],
+            role_description=ROLE_DESCRIPTIONS["enterprise_research"],
+            finish_schema=FINISH_SCHEMAS["enterprise_report"],
+        ),
+    }
+
+
+_cached_templates: Optional[Dict[str, PackTemplate]] = None
+
+
+def _template_from_yaml(raw: Dict[str, Any]) -> Optional[PackTemplate]:
+    """Parse a single template YAML dict into a PackTemplate.
+
+    Returns None if the dict is malformed.
+    """
+    template_id = raw.get("template_id")
+    if not template_id or not isinstance(template_id, str):
+        return None
+
+    tools = raw.get("tools", [])
+    if not isinstance(tools, list):
+        return None
+
+    role_key = raw.get("role", "")
+    role_description = ROLE_DESCRIPTIONS.get(role_key, "")
+    if not role_description:
+        logger.warning(
+            "Template %r references unknown role %r; "
+            "available roles: %s",
+            template_id, role_key, sorted(ROLE_DESCRIPTIONS.keys()),
+        )
+        return None
+
+    finish_schema_key = raw.get("finish_schema", "general")
+    finish_schema = FINISH_SCHEMAS.get(finish_schema_key)
+    if finish_schema is None:
+        logger.warning(
+            "Template %r references unknown finish_schema %r; using 'general'",
+            template_id, finish_schema_key,
+        )
+        finish_schema = FINISH_SCHEMAS["general"]
+
+    quality_gates = raw.get("quality_gates", [])
+    if not isinstance(quality_gates, list):
+        quality_gates = []
+
+    return PackTemplate(
+        template_id=str(template_id),
+        tool_names=[str(t) for t in tools],
+        role_description=role_description,
+        finish_schema=finish_schema,
+        quality_gates=[str(g) for g in quality_gates],
+    )
+
+
+def _load_templates() -> Dict[str, PackTemplate]:
+    """Load templates from YAML files via the config hierarchy."""
+    try:
+        from agentic_concierge.config.external import load_all_yaml_configs
+        raw_templates = load_all_yaml_configs("templates")
+    except Exception:
+        logger.debug("Failed to load templates from YAML; using fallback", exc_info=True)
+        return _fallback_templates()
+
+    if not raw_templates:
+        return _fallback_templates()
+
+    result: Dict[str, PackTemplate] = {}
+    for name, raw in raw_templates.items():
+        tpl = _template_from_yaml(raw)
+        if tpl is not None:
+            result[tpl.template_id] = tpl
+        else:
+            logger.warning("Skipping malformed template YAML: %s", name)
+
+    if not result:
+        return _fallback_templates()
+
+    return result
+
+
+def pack_templates() -> Dict[str, PackTemplate]:
+    """Return the loaded pack templates, loading from YAML on first access."""
+    global _cached_templates
+    if _cached_templates is None:
+        _cached_templates = _load_templates()
+    return _cached_templates
+
+
+def reload_templates() -> None:
+    """Clear cached templates — forces re-load on next access."""
+    global _cached_templates
+    _cached_templates = None
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +238,7 @@ def build_dynamic_pack(
         specialist_id=specialist_id,
         system_prompt=system_prompt,
         tools=tools,
-        finish_tool_def=finish_schema or _DEFAULT_FINISH_SCHEMA,
+        finish_tool_def=finish_schema or FINISH_SCHEMAS["general"],
         workspace_path=workspace_path,
         network_allowed=network_allowed,
         quality_gates=effective_gates,
@@ -169,20 +254,21 @@ def build_template_pack(
     """Build a pack from a registered template.
 
     Args:
-        template_id: Template name (must exist in ``PACK_TEMPLATES``).
+        template_id: Template name (must exist in loaded templates).
         workspace_path: Workspace directory path.
         network_allowed: Whether network tools are permitted.
         finish_schema_key: Optional override for the finish schema.
             When provided, overrides the template's built-in schema.
 
-    Raises ``KeyError`` if ``template_id`` is not in ``PACK_TEMPLATES``.
+    Raises ``KeyError`` if ``template_id`` is not found.
     """
-    if template_id not in PACK_TEMPLATES:
+    templates = pack_templates()
+    if template_id not in templates:
         raise KeyError(
             f"Unknown pack template {template_id!r}. "
-            f"Available: {sorted(PACK_TEMPLATES.keys())}"
+            f"Available: {sorted(templates.keys())}"
         )
-    tpl = PACK_TEMPLATES[template_id]
+    tpl = templates[template_id]
     return build_dynamic_pack(
         specialist_id=template_id,
         tool_names=tpl.tool_names,

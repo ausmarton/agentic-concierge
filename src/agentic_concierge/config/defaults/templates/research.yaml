@@ -1,0 +1,18 @@
+# Research specialist template.
+#
+# Override by placing a research.yaml in ~/.config/concierge/templates/
+# or add new templates by dropping YAML files in the same directory.
+
+template_id: research
+
+tools:
+  - web_search
+  - fetch_url
+  - read_file
+  - list_files
+
+role: research
+
+finish_schema: quick_answer
+
+quality_gates: []

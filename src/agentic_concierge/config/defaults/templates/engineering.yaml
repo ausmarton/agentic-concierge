@@ -1,0 +1,20 @@
+# Engineering specialist template.
+#
+# Override by placing an engineering.yaml in ~/.config/concierge/templates/
+# or add new templates by dropping YAML files in the same directory.
+
+template_id: engineering
+
+tools:
+  - shell
+  - read_file
+  - write_file
+  - list_files
+  - run_tests
+
+role: engineering
+
+finish_schema: code
+
+quality_gates:
+  - tests_verified

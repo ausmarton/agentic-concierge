@@ -69,24 +69,6 @@ def test_code_schema_has_tests_verified():
 
 
 # ---------------------------------------------------------------------------
-# Backward compatibility: dynamic_pack aliases
-# ---------------------------------------------------------------------------
-
-def test_dynamic_pack_aliases():
-    """The old schema constants in dynamic_pack.py should still exist as aliases."""
-    from agentic_concierge.infrastructure.specialists.dynamic_pack import (
-        _DEFAULT_FINISH_SCHEMA,
-        _ENGINEERING_FINISH_SCHEMA,
-        _ENTERPRISE_RESEARCH_FINISH_SCHEMA,
-        _RESEARCH_FINISH_SCHEMA,
-    )
-    assert _ENGINEERING_FINISH_SCHEMA is FINISH_SCHEMAS["code"]
-    assert _RESEARCH_FINISH_SCHEMA is FINISH_SCHEMAS["research_report"]
-    assert _ENTERPRISE_RESEARCH_FINISH_SCHEMA is FINISH_SCHEMAS["enterprise_report"]
-    assert _DEFAULT_FINISH_SCHEMA is FINISH_SCHEMAS["general"]
-
-
-# ---------------------------------------------------------------------------
 # Integration: finish_schema_key on build_dynamic_pack
 # ---------------------------------------------------------------------------
 

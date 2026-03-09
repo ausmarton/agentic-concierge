@@ -49,16 +49,16 @@ def test_resolve_mixed_code_and_web():
 
 def test_resolve_empty_caps_returns_a_template():
     """Empty capabilities list still returns a valid template."""
-    from agentic_concierge.infrastructure.specialists.dynamic_pack import PACK_TEMPLATES
+    from agentic_concierge.infrastructure.specialists.dynamic_pack import pack_templates
     result = _resolve_specialist_from_capabilities([])
-    assert result in PACK_TEMPLATES
+    assert result in pack_templates()
 
 
 def test_resolve_unknown_caps_returns_a_template():
     """Unknown capability names still produce a valid template (best-effort)."""
-    from agentic_concierge.infrastructure.specialists.dynamic_pack import PACK_TEMPLATES
+    from agentic_concierge.infrastructure.specialists.dynamic_pack import pack_templates
     result = _resolve_specialist_from_capabilities(["quantum_computing", "telepathy"])
-    assert result in PACK_TEMPLATES
+    assert result in pack_templates()
 
 
 # ---------------------------------------------------------------------------

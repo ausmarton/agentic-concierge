@@ -12,7 +12,7 @@ generated from the same fragment system for backward-compatible tests.
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +279,17 @@ structured, accurate reports with explicit confidence and staleness notes.
 4. Write a structured report to the workspace (workspace/report.md).
 5. Call finish_task when complete with an executive summary, source attributions,
    confidence ratings, and paths to artefact files."""
+
+
+# ---------------------------------------------------------------------------
+# Role description registry — maps YAML role keys to prompt text
+# ---------------------------------------------------------------------------
+
+ROLE_DESCRIPTIONS: Dict[str, str] = {
+    "engineering": ROLE_ENGINEERING,
+    "research": ROLE_RESEARCH,
+    "enterprise_research": ROLE_ENTERPRISE_RESEARCH,
+}
 
 
 # ---------------------------------------------------------------------------

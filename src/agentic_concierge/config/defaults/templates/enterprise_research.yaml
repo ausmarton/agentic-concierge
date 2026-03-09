@@ -1,0 +1,20 @@
+# Enterprise research specialist template.
+#
+# Override by placing an enterprise_research.yaml in ~/.config/concierge/templates/
+# or add new templates by dropping YAML files in the same directory.
+
+template_id: enterprise_research
+
+tools:
+  - cross_run_search
+  - web_search
+  - fetch_url
+  - write_file
+  - read_file
+  - list_files
+
+role: enterprise_research
+
+finish_schema: enterprise_report
+
+quality_gates: []

@@ -6,10 +6,10 @@ import tempfile
 import pytest
 
 from agentic_concierge.infrastructure.specialists.dynamic_pack import (
-    PACK_TEMPLATES,
     PackTemplate,
     build_dynamic_pack,
     build_template_pack,
+    pack_templates,
 )
 
 
@@ -19,21 +19,21 @@ from agentic_concierge.infrastructure.specialists.dynamic_pack import (
 
 
 def test_all_three_templates_registered():
-    assert set(PACK_TEMPLATES.keys()) == {"engineering", "research", "enterprise_research"}
+    assert set(pack_templates().keys()) == {"engineering", "research", "enterprise_research"}
 
 
 def test_templates_are_pack_template_instances():
-    for tpl in PACK_TEMPLATES.values():
+    for tpl in pack_templates().values():
         assert isinstance(tpl, PackTemplate)
 
 
 def test_engineering_template_has_correct_tools():
-    tpl = PACK_TEMPLATES["engineering"]
+    tpl = pack_templates()["engineering"]
     assert set(tpl.tool_names) == {"shell", "read_file", "write_file", "list_files", "run_tests"}
 
 
 def test_research_template_has_correct_tools():
-    tpl = PACK_TEMPLATES["research"]
+    tpl = pack_templates()["research"]
     assert "web_search" in tpl.tool_names
     assert "fetch_url" in tpl.tool_names
     assert "read_file" in tpl.tool_names
@@ -41,16 +41,16 @@ def test_research_template_has_correct_tools():
 
 
 def test_enterprise_research_template_has_cross_run_search():
-    tpl = PACK_TEMPLATES["enterprise_research"]
+    tpl = pack_templates()["enterprise_research"]
     assert "cross_run_search" in tpl.tool_names
 
 
 def test_engineering_template_has_quality_gate():
-    assert "tests_verified" in PACK_TEMPLATES["engineering"].quality_gates
+    assert "tests_verified" in pack_templates()["engineering"].quality_gates
 
 
 def test_research_template_has_no_quality_gate():
-    assert PACK_TEMPLATES["research"].quality_gates == []
+    assert pack_templates()["research"].quality_gates == []
 
 
 # ---------------------------------------------------------------------------

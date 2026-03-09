@@ -2,7 +2,7 @@
 
 Pack selection order for a given specialist_id:
 1. If ``tools`` list is provided, build a dynamic pack via ``build_dynamic_pack()``.
-2. If the specialist_id matches a ``PACK_TEMPLATES`` entry, build from the template.
+2. If the specialist_id matches a loaded template (from YAML), build from the template.
 3. If ``SpecialistConfig.builder`` is set, dynamically import and call that factory.
 4. Raise ``ValueError`` if none of the above apply.
 
@@ -21,7 +21,7 @@ from agentic_concierge.config import ConciergeConfig
 from agentic_concierge.application.ports import SpecialistPack, SpecialistRegistry
 from agentic_concierge.config.features import FeatureSet, ProfileTier
 
-from .dynamic_pack import PACK_TEMPLATES, build_dynamic_pack, build_template_pack
+from .dynamic_pack import build_dynamic_pack, build_template_pack, pack_templates
 
 logger = logging.getLogger(__name__)
 
@@ -157,8 +157,8 @@ class ConfigSpecialistRegistry(SpecialistRegistry):
             )
             builder = _load_builder(spec_cfg.builder)
             pack = builder(workspace_path, network_allowed)
-        elif specialist_id in PACK_TEMPLATES:
-            tpl = PACK_TEMPLATES[specialist_id]
+        elif specialist_id in pack_templates():
+            tpl = pack_templates()[specialist_id]
             if self._needs_consult_tool():
                 tpl_tools = self._maybe_add_consult(list(tpl.tool_names))
                 pack = build_dynamic_pack(
