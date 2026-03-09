@@ -36,7 +36,8 @@ def test_research_template_has_correct_tools():
     tpl = PACK_TEMPLATES["research"]
     assert "web_search" in tpl.tool_names
     assert "fetch_url" in tpl.tool_names
-    assert "write_file" in tpl.tool_names
+    assert "read_file" in tpl.tool_names
+    assert "list_files" in tpl.tool_names
 
 
 def test_enterprise_research_template_has_cross_run_search():
@@ -76,7 +77,8 @@ def test_build_template_pack_research_no_network():
         pack = build_template_pack("research", d, network_allowed=False)
         assert "web_search" not in pack.tool_names
         assert "fetch_url" not in pack.tool_names
-        assert "write_file" in pack.tool_names
+        assert "read_file" in pack.tool_names
+        assert "list_files" in pack.tool_names
 
 
 def test_build_template_pack_unknown_raises():

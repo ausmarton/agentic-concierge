@@ -47,11 +47,7 @@ def _finish_task_response(**kwargs) -> LLMResponse:
 
 MOCK_ENG_RESPONSE = _finish_task_response()
 MOCK_RESEARCH_RESPONSE = _finish_task_response(
-    summary="Research done",
-    executive_summary="Overview.",
-    key_findings=["Finding 1"],
-    citations=[],
-    gaps_and_future_work=[],
+    answer="Research done",
 )
 
 # A simple list_files call to satisfy the "prior tool call" structural requirement

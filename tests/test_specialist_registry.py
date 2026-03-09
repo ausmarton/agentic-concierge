@@ -82,7 +82,7 @@ def test_builtin_research_pack_resolves():
     registry = ConfigSpecialistRegistry(load_config())
     pack = registry.get_pack("research", "/tmp", network_allowed=False)
     assert pack.finish_tool_name == "finish_task"
-    assert "executive_summary" in pack.finish_required_fields
+    assert "answer" in pack.finish_required_fields
 
 
 # ---------------------------------------------------------------------------

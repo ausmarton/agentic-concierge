@@ -44,7 +44,7 @@ def _eng_finish(call_id: str = "c1", summary: str = "Engineering done") -> LLMRe
     )
 
 
-def _research_finish(call_id: str = "c2", summary: str = "Research done") -> LLMResponse:
+def _research_finish(call_id: str = "c2", answer: str = "Research done") -> LLMResponse:
     """Research pack finish_task response."""
     return LLMResponse(
         content=None,
@@ -52,10 +52,7 @@ def _research_finish(call_id: str = "c2", summary: str = "Research done") -> LLM
             call_id=call_id,
             tool_name="finish_task",
             arguments={
-                "executive_summary": summary,
-                "key_findings": ["finding1"],
-                "citations": [],
-                "gaps_and_future_work": [],
+                "answer": answer,
             },
         )],
     )
@@ -218,13 +215,12 @@ async def test_task_force_result_payload_is_from_last_pack(tmp_path):
     result, _ = await _run_task_force(
         "build a tool that does a systematic review of arxiv papers",
         [_create_plan_response(), _tool_resp("t0"), _eng_finish(summary="Engineering done"),
-         _tool_resp("t1"), _research_finish(summary="Research complete")],
+         _tool_resp("t1"), _research_finish(answer="Research complete")],
         tmp_path=tmp_path,
     )
 
-    # Research pack uses 'executive_summary', not 'summary'.
-    assert result.payload.get("executive_summary") == "Research complete"
-    assert "summary" not in result.payload or result.payload.get("executive_summary")
+    # Research pack uses 'answer' (quick_answer schema).
+    assert result.payload.get("answer") == "Research complete"
 
 
 @pytest.mark.asyncio

@@ -175,15 +175,15 @@ async def test_finish_task_valid_args_includes_all_provided_fields(tmp_path):
 
 @pytest.mark.asyncio
 async def test_finish_task_research_pack_requires_executive_summary(tmp_path):
-    """Research pack's required field is 'executive_summary', not 'summary'."""
+    """Research pack's required field is 'answer', not 'summary'."""
     prior_tool = _tool_response("list_files", call_id="c0")
-    # Missing executive_summary → should be rejected.
+    # Missing answer → should be rejected.
     incomplete = LLMResponse(
         content=None,
         tool_calls=[ToolCallRequest(
             call_id="c1",
             tool_name="finish_task",
-            arguments={"key_findings": ["finding"]},
+            arguments={"sources": ["http://example.com"]},
         )],
     )
     valid_call = LLMResponse(
@@ -192,10 +192,7 @@ async def test_finish_task_research_pack_requires_executive_summary(tmp_path):
             call_id="c2",
             tool_name="finish_task",
             arguments={
-                "executive_summary": "Overview",
-                "key_findings": ["finding"],
-                "citations": [],
-                "gaps_and_future_work": [],
+                "answer": "Overview",
             },
         )],
     )
@@ -203,7 +200,7 @@ async def test_finish_task_research_pack_requires_executive_summary(tmp_path):
     result = await _run([prior_tool, incomplete, valid_call], tmp_path=tmp_path, specialist_id="research")
 
     assert result.payload["action"] == "final"
-    assert result.payload["executive_summary"] == "Overview"
+    assert result.payload["answer"] == "Overview"
 
     events = _read_runlog(result.run_dir)
     error_result = next(
@@ -212,7 +209,7 @@ async def test_finish_task_research_pack_requires_executive_summary(tmp_path):
         and e["payload"]["tool"] == "finish_task"
         and "missing_fields" in e["payload"].get("result", {})
     )
-    assert "executive_summary" in error_result["payload"]["result"]["missing_fields"]
+    assert "answer" in error_result["payload"]["result"]["missing_fields"]
 
 
 # ---------------------------------------------------------------------------

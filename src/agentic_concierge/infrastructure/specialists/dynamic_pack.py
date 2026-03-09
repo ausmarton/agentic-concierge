@@ -61,9 +61,9 @@ PACK_TEMPLATES: Dict[str, PackTemplate] = {
     ),
     "research": PackTemplate(
         template_id="research",
-        tool_names=["web_search", "fetch_url", "write_file", "read_file", "list_files"],
+        tool_names=["web_search", "fetch_url", "read_file", "list_files"],
         role_description=ROLE_RESEARCH,
-        finish_schema=_RESEARCH_FINISH_SCHEMA,
+        finish_schema=FINISH_SCHEMAS["quick_answer"],
     ),
     "enterprise_research": PackTemplate(
         template_id="enterprise_research",
