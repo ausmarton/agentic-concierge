@@ -94,6 +94,64 @@ class SpecialistPack(Protocol):
     async def execute_tool(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]: ...
 
 
+class ModelRuntime(Protocol):
+    """Central model lifecycle manager.
+
+    Manages model loading, unloading, and resource allocation across
+    inference backends.  Application code acquires a ``ModelHandle`` for
+    each model it needs; the runtime handles backend selection, memory
+    management, and refcounting.
+
+    See DESIGN_V2.md §7.1 for rationale.
+    """
+
+    async def acquire(
+        self,
+        requirements: Dict[str, float],
+        *,
+        prefer_model: Optional[str] = None,
+        require_tool_calling: bool = True,
+        exclude_models: Optional[List[str]] = None,
+        timeout_s: float = 30.0,
+    ) -> Any:
+        """Ensure a model matching *requirements* is loaded; return a ``ModelHandle``.
+
+        The handle must be released (or used as an async context manager)
+        when no longer needed.
+
+        Args:
+            requirements: Capability name → minimum score (0.0–1.0).
+            prefer_model: Hint to prefer a specific model ID.
+            require_tool_calling: If ``True``, only models with
+                ``supports_tool_calling=True`` are considered.
+            exclude_models: Model IDs to exclude (e.g. for reviewer
+                must-differ-from constraint).
+            timeout_s: Max time to wait for model loading.
+
+        Raises:
+            RuntimeError: If no model matching requirements is available.
+        """
+        ...
+
+    async def release(self, handle: Any) -> None:
+        """Decrement refcount; model becomes eligible for eviction."""
+        ...
+
+    async def inventory(self) -> List[Any]:
+        """List all known models (loaded and available-to-load).
+
+        Returns a list of ``ModelInfo`` instances.
+        """
+        ...
+
+    async def status(self) -> Any:
+        """Current resource usage: loaded models, memory used/free.
+
+        Returns a ``RuntimeStatus`` instance.
+        """
+        ...
+
+
 class SpecialistRegistry(Protocol):
     """Resolve a specialist pack by id."""
 
