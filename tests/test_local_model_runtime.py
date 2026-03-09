@@ -21,7 +21,10 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
-from agentic_concierge.infrastructure.backends.model_runtime import LocalModelRuntime
+from agentic_concierge.infrastructure.backends.model_runtime import (
+    LocalModelRuntime,
+    detect_memory_budget_mb,
+)
 from agentic_concierge.infrastructure.backends.protocol import (
     ModelHandle,
     ModelInfo,
@@ -537,3 +540,215 @@ class TestMultiBackend:
         )
         assert handle.model_id == "llama3.1:8b"
         assert handle.slot.backend == "backend_b"
+
+
+# ---------------------------------------------------------------------------
+# LRU Eviction
+# ---------------------------------------------------------------------------
+
+
+def _make_eviction_runtime(
+    models: List[str],
+    memory_estimates: Dict[str, int],
+    budget_mb: int,
+) -> tuple[LocalModelRuntime, FakeBackend]:
+    """Create a runtime with a specific memory budget for eviction tests."""
+    backend = FakeBackend(
+        backend_name="fake",
+        models=models,
+        memory_estimates=memory_estimates,
+    )
+    registry = _make_registry((backend, 0))
+    runtime = LocalModelRuntime(registry, memory_budget_mb=budget_mb)
+    return runtime, backend
+
+
+class TestEviction:
+
+    @pytest.mark.asyncio
+    async def test_eviction_frees_memory_for_new_model(self):
+        """Loading a third model evicts the oldest unused one."""
+        runtime, backend = _make_eviction_runtime(
+            models=["model-a:7b", "model-b:7b", "model-c:7b"],
+            memory_estimates={"model-a:7b": 4000, "model-b:7b": 4000, "model-c:7b": 4000},
+            budget_mb=8000,  # room for 2 models
+        )
+
+        # Load two models
+        h1 = await runtime.acquire({}, prefer_model="model-a:7b", require_tool_calling=False)
+        await runtime.release(h1)
+        h2 = await runtime.acquire({}, prefer_model="model-b:7b", require_tool_calling=False)
+        await runtime.release(h2)
+
+        # Both loaded, budget full
+        assert len(runtime._slots) == 2
+
+        # Loading a third model should evict model-a (oldest/LRU)
+        h3 = await runtime.acquire({}, prefer_model="model-c:7b", require_tool_calling=False)
+        assert h3.model_id == "model-c:7b"
+        assert "model-a:7b" not in runtime._slots  # evicted
+        assert "model-b:7b" in runtime._slots  # newer, kept
+        assert "model-c:7b" in runtime._slots  # just loaded
+
+    @pytest.mark.asyncio
+    async def test_in_use_models_never_evicted(self):
+        """Models with refcount > 0 are never evicted, even under pressure."""
+        runtime, _ = _make_eviction_runtime(
+            models=["model-a:7b", "model-b:7b"],
+            memory_estimates={"model-a:7b": 5000, "model-b:7b": 5000},
+            budget_mb=6000,  # room for only 1 model
+        )
+
+        # Hold a reference to model-a (refcount=1, cannot be evicted)
+        h1 = await runtime.acquire({}, prefer_model="model-a:7b", require_tool_calling=False)
+        assert h1.slot.refcount == 1
+
+        # Try to load model-b — should fail (model-a is in use, can't evict)
+        with pytest.raises(RuntimeError, match="Insufficient memory"):
+            await runtime.acquire({}, prefer_model="model-b:7b", require_tool_calling=False)
+
+        # model-a still loaded
+        assert "model-a:7b" in runtime._slots
+
+    @pytest.mark.asyncio
+    async def test_lru_order_respected(self):
+        """Oldest unused model is evicted first (LRU)."""
+        runtime, _ = _make_eviction_runtime(
+            models=["old:7b", "mid:7b", "new:7b", "newest:7b"],
+            memory_estimates={"old:7b": 3000, "mid:7b": 3000, "new:7b": 3000, "newest:7b": 3000},
+            budget_mb=9000,  # room for 3 models
+        )
+
+        # Load three models in order: old, mid, new
+        h_old = await runtime.acquire({}, prefer_model="old:7b", require_tool_calling=False)
+        await runtime.release(h_old)  # released first → oldest
+
+        h_mid = await runtime.acquire({}, prefer_model="mid:7b", require_tool_calling=False)
+        await runtime.release(h_mid)  # released second
+
+        h_new = await runtime.acquire({}, prefer_model="new:7b", require_tool_calling=False)
+        await runtime.release(h_new)  # released last → newest
+
+        # All three loaded
+        assert len(runtime._slots) == 3
+
+        # Load a fourth — should evict "old" (earliest last_used)
+        await runtime.acquire({}, prefer_model="newest:7b", require_tool_calling=False)
+        assert "old:7b" not in runtime._slots
+        assert "mid:7b" in runtime._slots
+        assert "new:7b" in runtime._slots
+        assert "newest:7b" in runtime._slots
+
+    @pytest.mark.asyncio
+    async def test_evicts_multiple_models_if_needed(self):
+        """Evict multiple models when the new one needs more space."""
+        runtime, _ = _make_eviction_runtime(
+            models=["small-a:7b", "small-b:7b", "big:7b"],
+            memory_estimates={"small-a:7b": 2000, "small-b:7b": 2000, "big:7b": 6000},
+            budget_mb=6000,
+        )
+
+        h1 = await runtime.acquire({}, prefer_model="small-a:7b", require_tool_calling=False)
+        await runtime.release(h1)
+        h2 = await runtime.acquire({}, prefer_model="small-b:7b", require_tool_calling=False)
+        await runtime.release(h2)
+
+        # Budget: 6000, used: 4000. Need 6000 for big model → must evict both.
+        h3 = await runtime.acquire({}, prefer_model="big:7b", require_tool_calling=False)
+        assert h3.model_id == "big:7b"
+        assert "small-a:7b" not in runtime._slots
+        assert "small-b:7b" not in runtime._slots
+
+    @pytest.mark.asyncio
+    async def test_no_eviction_when_budget_sufficient(self):
+        """No eviction occurs when memory budget is sufficient."""
+        runtime, backend = _make_eviction_runtime(
+            models=["model-a:7b", "model-b:7b"],
+            memory_estimates={"model-a:7b": 4000, "model-b:7b": 4000},
+            budget_mb=16000,  # plenty of room
+        )
+
+        h1 = await runtime.acquire({}, prefer_model="model-a:7b", require_tool_calling=False)
+        await runtime.release(h1)
+        await runtime.acquire({}, prefer_model="model-b:7b", require_tool_calling=False)
+
+        # Both models should still be loaded
+        assert len(runtime._slots) == 2
+        assert "model-a:7b" in runtime._slots
+        assert "model-b:7b" in runtime._slots
+
+    @pytest.mark.asyncio
+    async def test_eviction_skipped_when_budget_zero(self):
+        """When memory budget is 0 (unknown), eviction is skipped."""
+        runtime, _ = _make_eviction_runtime(
+            models=["model-a:7b", "model-b:7b"],
+            memory_estimates={"model-a:7b": 4000, "model-b:7b": 4000},
+            budget_mb=0,  # no budget → no eviction
+        )
+
+        h1 = await runtime.acquire({}, prefer_model="model-a:7b", require_tool_calling=False)
+        await runtime.release(h1)
+        await runtime.acquire({}, prefer_model="model-b:7b", require_tool_calling=False)
+
+        # Both loaded, no eviction attempted
+        assert len(runtime._slots) == 2
+
+    @pytest.mark.asyncio
+    async def test_eviction_skipped_when_estimate_zero(self):
+        """When model memory estimate is 0 (unknown), eviction is skipped."""
+        runtime, _ = _make_eviction_runtime(
+            models=["model-a:7b", "model-b:7b"],
+            memory_estimates={"model-a:7b": 4000, "model-b:7b": 0},  # unknown
+            budget_mb=5000,
+        )
+
+        h1 = await runtime.acquire({}, prefer_model="model-a:7b", require_tool_calling=False)
+        await runtime.release(h1)
+        # model-b estimate is 0 → eviction check skipped
+        await runtime.acquire({}, prefer_model="model-b:7b", require_tool_calling=False)
+
+        assert len(runtime._slots) == 2
+
+
+# ---------------------------------------------------------------------------
+# Resource tracking
+# ---------------------------------------------------------------------------
+
+
+class TestResourceTracking:
+
+    @pytest.mark.asyncio
+    async def test_status_reports_memory_budget(self):
+        runtime, _ = _make_eviction_runtime(
+            models=["model-a:7b"],
+            memory_estimates={"model-a:7b": 4000},
+            budget_mb=64000,
+        )
+
+        st = await runtime.status()
+        assert st.total_memory_mb == 64000
+        assert st.used_memory_mb == 0
+        assert st.free_memory_mb == 64000
+
+    @pytest.mark.asyncio
+    async def test_status_tracks_used_memory(self):
+        runtime, _ = _make_eviction_runtime(
+            models=["model-a:7b", "model-b:7b"],
+            memory_estimates={"model-a:7b": 4000, "model-b:7b": 5000},
+            budget_mb=64000,
+        )
+
+        await runtime.acquire({}, prefer_model="model-a:7b", require_tool_calling=False)
+        st = await runtime.status()
+        assert st.used_memory_mb == 4000
+        assert st.free_memory_mb == 60000
+
+        await runtime.acquire({}, prefer_model="model-b:7b", require_tool_calling=False)
+        st = await runtime.status()
+        assert st.used_memory_mb == 9000
+        assert st.free_memory_mb == 55000
+
+    def test_detect_memory_budget_returns_positive(self):
+        """On a real system, detect_memory_budget_mb should return > 0."""
+        budget = detect_memory_budget_mb()
+        assert budget > 0  # should work on any Linux/macOS system

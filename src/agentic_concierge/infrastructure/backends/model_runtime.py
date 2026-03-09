@@ -1,13 +1,14 @@
 """LocalModelRuntime — concrete ModelRuntime for single-machine model lifecycle.
 
 Wraps ``BackendRegistry`` and model capability profiles to manage model
-loading, capability matching, and refcounting.  Application code acquires a
-``ModelHandle`` for each model it needs; the runtime handles backend
-selection, capability matching, and reference tracking.
+loading, capability matching, refcounting, and LRU eviction.  Application
+code acquires a ``ModelHandle`` for each model it needs; the runtime handles
+backend selection, capability matching, memory management, and reference
+tracking.
 
 Usage::
 
-    runtime = LocalModelRuntime(registry)
+    runtime = LocalModelRuntime(registry, memory_budget_mb=64_000)
     async with await runtime.acquire({"reasoning": 0.7}) as handle:
         response = await handle.chat_client.chat(messages, handle.model_id)
     # auto-released here
@@ -19,6 +20,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import platform
 import time
 from typing import Any, Dict, List, Optional
 
@@ -33,20 +36,75 @@ from agentic_concierge.infrastructure.model_profiles import get_profile, match_m
 
 logger = logging.getLogger(__name__)
 
+# Reserve 15% of total RAM for OS and other processes.
+_OS_RESERVE_FRACTION = 0.15
+
+# APU VRAM correction threshold: when a GPU reports less than this
+# amount of VRAM, it's likely an APU sharing system RAM.
+_APU_VRAM_THRESHOLD_MB = 4096
+
+# Minimum system RAM (MB) to apply APU correction.
+_APU_RAM_THRESHOLD_MB = 32_768
+
+
+def detect_memory_budget_mb() -> int:
+    """Detect total system RAM and return a conservative memory budget in MB.
+
+    Returns 85% of total system RAM (leaving room for OS and other
+    processes).  Returns 0 if detection fails.
+    """
+    try:
+        system = platform.system()
+        if system == "Linux":
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        # "MemTotal:   131935860 kB"
+                        parts = line.split()
+                        kb = int(parts[1])
+                        total_mb = kb // 1024
+                        return int(total_mb * (1 - _OS_RESERVE_FRACTION))
+        elif system == "Darwin":
+            import subprocess
+            result = subprocess.run(
+                ["sysctl", "-n", "hw.memsize"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                total_bytes = int(result.stdout.strip())
+                total_mb = total_bytes // (1024 * 1024)
+                return int(total_mb * (1 - _OS_RESERVE_FRACTION))
+    except Exception:
+        logger.debug("Failed to detect system memory", exc_info=True)
+    return 0
+
 
 class LocalModelRuntime:
     """Concrete ModelRuntime for single-machine model lifecycle management.
 
-    Manages model loading, capability matching, and refcounting across
-    all healthy backends in the ``BackendRegistry``.  Serialises
-    ``acquire()`` / ``release()`` calls with an ``asyncio.Lock`` to
-    prevent races on slot state.
+    Manages model loading, capability matching, refcounting, and LRU
+    eviction across all healthy backends in the ``BackendRegistry``.
+    Serialises ``acquire()`` / ``release()`` calls with an
+    ``asyncio.Lock`` to prevent races on slot state.
+
+    When ``acquire()`` needs to load a new model and the memory budget
+    would be exceeded, it evicts the least-recently-used models with
+    ``refcount == 0`` until enough memory is free.
     """
 
-    def __init__(self, registry: BackendRegistry) -> None:
+    def __init__(
+        self,
+        registry: BackendRegistry,
+        memory_budget_mb: Optional[int] = None,
+    ) -> None:
         self._registry = registry
         self._slots: Dict[str, ModelSlot] = {}  # model_id → loaded slot
         self._lock = asyncio.Lock()
+        self._memory_budget_mb = (
+            memory_budget_mb
+            if memory_budget_mb is not None
+            else detect_memory_budget_mb()
+        )
 
     # -------------------------------------------------------------------
     # Acquire / Release
@@ -96,12 +154,16 @@ class LocalModelRuntime:
         excluded = set(exclude_models or [])
 
         # --- Fast path: reuse already-loaded model (no I/O) ---
+        # Skip the fast path when prefer_model is specified but not loaded;
+        # this allows the slow path to discover and load the preferred model.
         loaded_ids = [mid for mid in self._slots if mid not in excluded]
-        selected = self._select_model(
-            loaded_ids, requirements, require_tool_calling, prefer_model,
-        )
-        if selected is not None:
-            return self._handle_for_loaded(selected)
+        skip_fast = bool(prefer_model and prefer_model not in loaded_ids)
+        if not skip_fast:
+            selected = self._select_model(
+                loaded_ids, requirements, require_tool_calling, prefer_model,
+            )
+            if selected is not None:
+                return self._handle_for_loaded(selected)
 
         # --- Slow path: discover available models from backends ---
         model_backends = await self._discover_available()
@@ -119,8 +181,16 @@ class LocalModelRuntime:
         if selected in self._slots:
             return self._handle_for_loaded(selected)
 
-        # Load model via backend
+        # Estimate memory and evict if necessary
         backend = model_backends[selected]
+        try:
+            needed_mb = await backend.estimate_memory(selected)
+        except Exception:
+            needed_mb = 0
+        if needed_mb > 0 and self._memory_budget_mb > 0:
+            await self._ensure_memory(needed_mb)
+
+        # Load model via backend
         slot = await backend.load_model(selected)
         slot.refcount = 1
         self._slots[selected] = slot
@@ -180,8 +250,65 @@ class LocalModelRuntime:
         used = sum(s.memory_mb for s in loaded)
         return RuntimeStatus(
             loaded_models=loaded,
+            total_memory_mb=self._memory_budget_mb,
             used_memory_mb=used,
         )
+
+    # -------------------------------------------------------------------
+    # Eviction
+    # -------------------------------------------------------------------
+
+    @property
+    def _used_memory_mb(self) -> int:
+        """Total memory consumed by all loaded models."""
+        return sum(s.memory_mb for s in self._slots.values())
+
+    async def _ensure_memory(self, needed_mb: int) -> None:
+        """Evict LRU models with ``refcount == 0`` until enough memory is free.
+
+        Raises ``RuntimeError`` if there is not enough reclaimable memory
+        (all models are in use).
+        """
+        free = self._memory_budget_mb - self._used_memory_mb
+        if free >= needed_mb:
+            return
+
+        # Sort evictable models by last_used (oldest first = LRU)
+        evictable = sorted(
+            [s for s in self._slots.values() if s.refcount == 0],
+            key=lambda s: s.last_used,
+        )
+
+        for slot in evictable:
+            if free >= needed_mb:
+                break
+            backend = self._registry.get_backend(slot.backend)
+            if backend is not None:
+                try:
+                    await backend.unload_model(slot.model_id)
+                except Exception:
+                    logger.warning(
+                        "Failed to unload model %s from %s",
+                        slot.model_id, slot.backend, exc_info=True,
+                    )
+            free += slot.memory_mb
+            del self._slots[slot.model_id]
+            logger.info(
+                "Evicted model %s (%d MB) — free: %d MB",
+                slot.model_id, slot.memory_mb, free,
+            )
+
+        if free < needed_mb:
+            in_use = [
+                f"{s.model_id} (refcount={s.refcount}, {s.memory_mb} MB)"
+                for s in self._slots.values()
+                if s.refcount > 0
+            ]
+            raise RuntimeError(
+                f"Insufficient memory: need {needed_mb} MB but only {free} MB "
+                f"available after evicting all unused models. "
+                f"In-use models: {in_use}"
+            )
 
     # -------------------------------------------------------------------
     # Internal helpers
