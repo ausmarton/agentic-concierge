@@ -376,3 +376,49 @@ class TestInferFinishSchemaFromCapabilities:
         assert infer_finish_schema_from_capabilities(
             ["web_comprehension", "summarisation"]
         ) == "quick_answer"
+
+
+# ---------------------------------------------------------------------------
+# Issue #1: KNOWN_CAPABILITIES export
+# ---------------------------------------------------------------------------
+
+
+def test_known_capabilities_is_frozenset():
+    from agentic_concierge.infrastructure.model_profiles import KNOWN_CAPABILITIES
+    assert isinstance(KNOWN_CAPABILITIES, frozenset)
+    assert "web_comprehension" in KNOWN_CAPABILITIES
+    assert "code_python" in KNOWN_CAPABILITIES
+    assert "reasoning" in KNOWN_CAPABILITIES
+    assert "fabricated_cap" not in KNOWN_CAPABILITIES
+
+
+# ---------------------------------------------------------------------------
+# Issue #5: qwen3-coder model profile
+# ---------------------------------------------------------------------------
+
+
+def test_extract_family_qwen3_coder():
+    assert _extract_family("qwen3-coder:30b") == "qwen3-coder"
+
+
+def test_get_profile_qwen3_coder():
+    p = get_profile("qwen3-coder:30b")
+    assert p.family == "qwen3-coder"
+    assert p.capabilities["code_python"] >= 0.9
+    assert p.capabilities["web_comprehension"] <= 0.4
+
+
+def test_qwen3_coder_not_selected_for_web_task():
+    result = match_models(
+        ["qwen2.5:7b", "qwen3-coder:30b"],
+        required_capabilities={"web_comprehension": 0.6},
+    )
+    assert result == "qwen2.5:7b"
+
+
+def test_qwen3_coder_selected_for_code_task():
+    result = match_models(
+        ["qwen2.5:7b", "qwen3-coder:30b"],
+        required_capabilities={"code_python": 0.8},
+    )
+    assert result == "qwen3-coder:30b"

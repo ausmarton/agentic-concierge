@@ -255,3 +255,136 @@ async def test_review_events_in_runlog(tmp_path):
     assert review_starts[0]["payload"]["specialist_id"] == "engineering"
     assert len(review_approveds) == 1
     assert review_approveds[0]["payload"]["review_iteration"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Issue #3: Schema-aware reviewer prompt
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reviewer_quick_answer_uses_correct_prompt(tmp_path):
+    """When finish_schema_key='quick_answer', reviewer uses the quick_answer prompt."""
+    from agentic_concierge.application.execute_task import _review_specialist_work
+    from agentic_concierge.infrastructure.specialists.prompts import PROMPT_REVIEWER_QUICK_ANSWER
+
+    # Mock a pack with minimal tools
+    mock_pack = type("P", (), {
+        "tool_definitions": [],
+        "system_prompt": "",
+    })()
+
+    run_repository = FileSystemRunRepository(workspace_root=str(tmp_path))
+    run_id, _, _ = run_repository.create_run()
+    from agentic_concierge.config.schema import ModelConfig
+    model_cfg = ModelConfig(base_url="http://localhost:11434/v1", model="qwen2.5:7b")
+
+    captured_messages = []
+
+    async def mock_chat(*, messages, model, tools=None, **kwargs):
+        captured_messages.extend(messages)
+        return _approve_response()
+
+    with patch.object(OllamaChatClient, "chat", new_callable=AsyncMock, side_effect=mock_chat):
+        client = OllamaChatClient(base_url="http://localhost:11434/v1", timeout_s=5.0)
+        await _review_specialist_work(
+            finish_payload={"answer": "KO costs $70", "confidence": "high"},
+            pack=mock_pack,
+            model_cfg=model_cfg,
+            chat_client=client,
+            run_repository=run_repository,
+            run_id=run_id,
+            specialist_id="research",
+            event_queue=None,
+            review_iteration=0,
+            finish_schema_key="quick_answer",
+        )
+
+    # Verify the system prompt used was the quick_answer one
+    system_msg = captured_messages[0]
+    assert system_msg["role"] == "system"
+    assert "Do NOT inspect the workspace" in system_msg["content"]
+
+
+@pytest.mark.asyncio
+async def test_reviewer_standard_prompt_for_code_schema(tmp_path):
+    """When finish_schema_key='code', reviewer uses the standard prompt."""
+    from agentic_concierge.application.execute_task import _review_specialist_work
+    from agentic_concierge.infrastructure.specialists.prompts import PROMPT_REVIEWER
+
+    mock_pack = type("P", (), {
+        "tool_definitions": [],
+        "system_prompt": "",
+    })()
+
+    run_repository = FileSystemRunRepository(workspace_root=str(tmp_path))
+    run_id, _, _ = run_repository.create_run()
+    from agentic_concierge.config.schema import ModelConfig
+    model_cfg = ModelConfig(base_url="http://localhost:11434/v1", model="qwen2.5:7b")
+
+    captured_messages = []
+
+    async def mock_chat(*, messages, model, tools=None, **kwargs):
+        captured_messages.extend(messages)
+        return _approve_response()
+
+    with patch.object(OllamaChatClient, "chat", new_callable=AsyncMock, side_effect=mock_chat):
+        client = OllamaChatClient(base_url="http://localhost:11434/v1", timeout_s=5.0)
+        await _review_specialist_work(
+            finish_payload={"summary": "Built the app"},
+            pack=mock_pack,
+            model_cfg=model_cfg,
+            chat_client=client,
+            run_repository=run_repository,
+            run_id=run_id,
+            specialist_id="engineering",
+            event_queue=None,
+            review_iteration=0,
+            finish_schema_key="code",
+        )
+
+    system_msg = captured_messages[0]
+    assert system_msg["role"] == "system"
+    assert "workspace" in system_msg["content"].lower()
+    assert "Do NOT inspect the workspace" not in system_msg["content"]
+
+
+@pytest.mark.asyncio
+async def test_reviewer_standard_prompt_when_no_schema(tmp_path):
+    """When finish_schema_key=None, reviewer uses the standard prompt."""
+    from agentic_concierge.application.execute_task import _review_specialist_work
+
+    mock_pack = type("P", (), {
+        "tool_definitions": [],
+        "system_prompt": "",
+    })()
+
+    run_repository = FileSystemRunRepository(workspace_root=str(tmp_path))
+    run_id, _, _ = run_repository.create_run()
+    from agentic_concierge.config.schema import ModelConfig
+    model_cfg = ModelConfig(base_url="http://localhost:11434/v1", model="qwen2.5:7b")
+
+    captured_messages = []
+
+    async def mock_chat(*, messages, model, tools=None, **kwargs):
+        captured_messages.extend(messages)
+        return _approve_response()
+
+    with patch.object(OllamaChatClient, "chat", new_callable=AsyncMock, side_effect=mock_chat):
+        client = OllamaChatClient(base_url="http://localhost:11434/v1", timeout_s=5.0)
+        await _review_specialist_work(
+            finish_payload={"summary": "Done"},
+            pack=mock_pack,
+            model_cfg=model_cfg,
+            chat_client=client,
+            run_repository=run_repository,
+            run_id=run_id,
+            specialist_id="engineering",
+            event_queue=None,
+            review_iteration=0,
+            finish_schema_key=None,
+        )
+
+    system_msg = captured_messages[0]
+    assert system_msg["role"] == "system"
+    assert "workspace" in system_msg["content"].lower()

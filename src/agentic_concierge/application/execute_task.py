@@ -209,7 +209,9 @@ def _select_specialist_model(
     # Use explicit capabilities from orchestrator when available;
     # otherwise infer from template/tools.
     if assignment.required_capabilities:
-        caps = {c: 0.6 for c in assignment.required_capabilities}
+        from agentic_concierge.infrastructure.model_profiles import KNOWN_CAPABILITIES
+        valid_caps = [c for c in assignment.required_capabilities if c in KNOWN_CAPABILITIES]
+        caps = {c: 0.6 for c in valid_caps} if valid_caps else {}
     else:
         caps = infer_task_capabilities(
             template_id=assignment.specialist_id if assignment.specialist_id != "dynamic" else None,
@@ -614,6 +616,7 @@ async def execute_task(
                     specialist_registry=specialist_registry,
                     workspace_path=workspace_path,
                     config=config,
+                    finish_schema_key=assignment.finish_schema if assignment else None,
                 )
 
                 all_specialist_payloads[specialist_id] = pack_payload
@@ -871,6 +874,7 @@ async def resume_execute_task(
 
             step_prefix = f"{specialist_id}_" if is_task_force else ""
 
+            # Resume path: finish_schema_key not available from checkpoint.
             pack_payload = await _execute_pack_loop(
                 pack=pack,
                 messages=messages,
@@ -1171,6 +1175,7 @@ async def _review_specialist_work(
     review_iteration: int,
     reviewer_model_cfg: Optional[ModelConfig] = None,
     available_models: Optional[List[str]] = None,
+    finish_schema_key: Optional[str] = None,
 ) -> tuple:
     """Independently review a specialist's finish_task payload.
 
@@ -1185,7 +1190,16 @@ async def _review_specialist_work(
     Returns:
         ``(approved: bool, comment_or_critique: str)``
     """
-    from agentic_concierge.infrastructure.specialists.prompts import PROMPT_REVIEWER
+    from agentic_concierge.infrastructure.specialists.prompts import (
+        PROMPT_REVIEWER,
+        PROMPT_REVIEWER_QUICK_ANSWER,
+    )
+
+    reviewer_prompt = (
+        PROMPT_REVIEWER_QUICK_ANSWER
+        if finish_schema_key == "quick_answer"
+        else PROMPT_REVIEWER
+    )
 
     # Select reviewer model: prefer a different model with reasoning capability
     rev_model_cfg = reviewer_model_cfg or model_cfg
@@ -1236,7 +1250,7 @@ async def _review_specialist_work(
     # Build reviewer messages
     payload_json = json.dumps(finish_payload, indent=2, ensure_ascii=False)
     rev_messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": PROMPT_REVIEWER},
+        {"role": "system", "content": reviewer_prompt},
         {
             "role": "user",
             "content": (
@@ -1415,6 +1429,7 @@ async def _run_task_force_parallel(
             specialist_registry=specialist_registry,
             workspace_path=workspace_path,
             config=config,
+            finish_schema_key=assignment.finish_schema if assignment else None,
         )
 
     results = await asyncio.gather(
@@ -1571,6 +1586,7 @@ async def _execute_pack_loop(
     specialist_registry: Optional[Any] = None,
     workspace_path: Optional[str] = None,
     config: Optional[Any] = None,
+    finish_schema_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run one specialist pack's tool loop until ``finish_task`` or ``max_steps``.
 
@@ -2183,6 +2199,7 @@ async def _execute_pack_loop(
                         event_queue=event_queue,
                         review_iteration=review_iteration_count,
                         available_models=available_models,
+                        finish_schema_key=finish_schema_key,
                     )
                     if not approved:
                         review_iteration_count += 1

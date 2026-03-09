@@ -62,6 +62,17 @@ BUILTIN_PROFILES: Dict[str, ModelCapabilityProfile] = {
             "structured_output": 0.8,
         },
     ),
+    "qwen3-coder": ModelCapabilityProfile(
+        family="qwen3-coder",
+        supports_tool_calling=True,
+        capabilities={
+            "code_python": 0.95, "code_rust": 0.85, "code_sql": 0.8,
+            "reasoning": 0.5, "web_comprehension": 0.3,
+            "summarisation": 0.4, "instruction_following": 0.7,
+            "structured_output": 0.7,
+        },
+        notes="MoE architecture; 30B total params, ~3-4B active",
+    ),
     "llama3.1": ModelCapabilityProfile(
         family="llama3.1",
         supports_tool_calling=True,
@@ -365,6 +376,8 @@ _CAPABILITY_TOOLS: Dict[str, List[str]] = {
 }
 
 # Capability → mission fragment for generating role descriptions.
+KNOWN_CAPABILITIES: frozenset = frozenset(_CAPABILITY_TOOLS.keys())
+
 _CAPABILITY_MISSION: Dict[str, str] = {
     "web_comprehension": "find accurate, up-to-date information using web search and URL fetching",
     "code_python": "write, debug, and test Python code",

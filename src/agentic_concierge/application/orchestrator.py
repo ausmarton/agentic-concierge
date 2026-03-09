@@ -162,6 +162,24 @@ def _build_orchestrator_tool_def() -> Dict[str, Any]:
     }
 
 
+def _filter_known_capabilities(raw_caps: List[str]) -> List[str]:
+    """Filter to known capability names, warning on unknown ones.
+
+    Returns only capabilities present in ``KNOWN_CAPABILITIES``.
+    If everything is filtered out, returns ``["instruction_following"]``
+    as a safe default (model-only, triggers degenerate fallback).
+    """
+    from agentic_concierge.infrastructure.model_profiles import KNOWN_CAPABILITIES
+
+    known = [c for c in raw_caps if c in KNOWN_CAPABILITIES]
+    unknown = [c for c in raw_caps if c not in KNOWN_CAPABILITIES]
+    if unknown:
+        logger.warning(
+            "Orchestrator specified unknown capabilities %s; ignoring", unknown,
+        )
+    return known or ["instruction_following"]
+
+
 def _resolve_specialist_from_capabilities(
     required_capabilities: List[str],
 ) -> str:
@@ -211,7 +229,7 @@ def _resolve_pack_from_capabilities(
     # tool capabilities requested.  Fall back to research (most general).
     from agentic_concierge.infrastructure.model_profiles import _BASE_TOOLS
     if composed_set == set(_BASE_TOOLS):
-        return ("research", None, None, None)
+        return ("research", None, None, "quick_answer")
 
     # Check if any template's tool set matches exactly.
     for tid, tpl in PACK_TEMPLATES.items():
@@ -461,7 +479,7 @@ async def orchestrate_task(
         raw_fs = a.get("finish_schema")
         finish_schema = raw_fs if raw_fs in FINISH_SCHEMA_KEYS else None
         raw_caps = a.get("required_capabilities")
-        req_caps = raw_caps if isinstance(raw_caps, list) else None
+        req_caps = _filter_known_capabilities(raw_caps) if isinstance(raw_caps, list) else None
 
         # Legacy backward compat: if the LLM (or a test) provides
         # specialist_id directly, accept it as an override.

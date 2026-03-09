@@ -2,7 +2,7 @@
 
 **Purpose:** Single source of truth for “where we are” so any human or agent can resume work across restarts and sessions.
 
-**Last updated:** 2026-03-09. Fast CI: **853 pass** (`make test`).
+**Last updated:** 2026-03-09. Fast CI: **871 pass** (`make test`).
 Rust launcher: **22 tests pass** (`make test-rust`).
 
 ---
@@ -396,7 +396,7 @@ All Phase 1 functional requirements (FR1–FR6 in REQUIREMENTS.md) have automate
 **The backlog is the canonical source for what to work on next.**
 
 1. Read [BACKLOG.md](BACKLOG.md) — find the first non-done item; that is what to work on.
-2. Run `pytest tests/ -k “not real_llm and not verify and not real_mcp”` — confirm **853 pass** before touching code.
+2. Run `pytest tests/ -k “not real_llm and not verify and not real_mcp”` — confirm **871 pass** before touching code.
 3. Phase 12 is complete — see BACKLOG.md for Phase 13 planning or add new items.
 4. See [DECISIONS.md](DECISIONS.md) for rationale behind key architectural choices.
 

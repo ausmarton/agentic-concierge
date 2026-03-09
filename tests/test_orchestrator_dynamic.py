@@ -531,3 +531,80 @@ async def test_dedup_applied_in_orchestrate_task():
     assert plan.specialist_assignments[0].specialist_id == "research"
     assert "KO" in plan.specialist_assignments[0].brief
     assert "BAC" in plan.specialist_assignments[0].brief
+
+
+# ---------------------------------------------------------------------------
+# Issue #1: Capability validation — _filter_known_capabilities
+# ---------------------------------------------------------------------------
+
+
+def test_filter_known_capabilities_all_valid():
+    from agentic_concierge.application.orchestrator import _filter_known_capabilities
+    result = _filter_known_capabilities(["web_comprehension", "code_python"])
+    assert result == ["web_comprehension", "code_python"]
+
+
+def test_filter_known_capabilities_all_hallucinated():
+    from agentic_concierge.application.orchestrator import _filter_known_capabilities
+    result = _filter_known_capabilities(["systematic_review", "citation_extraction"])
+    assert result == ["instruction_following"]
+
+
+def test_filter_known_capabilities_mixed():
+    from agentic_concierge.application.orchestrator import _filter_known_capabilities
+    result = _filter_known_capabilities(["web_comprehension", "fabricated_cap"])
+    assert result == ["web_comprehension"]
+
+
+def test_filter_known_capabilities_empty_input():
+    from agentic_concierge.application.orchestrator import _filter_known_capabilities
+    result = _filter_known_capabilities([])
+    assert result == ["instruction_following"]
+
+
+@pytest.mark.asyncio
+async def test_hallucinated_capabilities_filtered_in_routing():
+    """LLM returns hallucinated caps → filtered to defaults → correct resolution."""
+    resp = _capability_plan_response(
+        required_capabilities=["systematic_review", "web_search", "file_io"],
+        brief="stock price lookup",
+    )
+    plan = await _call_orchestrate(resp, "What is KO stock price?")
+    # Hallucinated caps filtered → defaults to instruction_following → degenerate → research
+    assert plan.specialist_assignments[0].specialist_id == "research"
+    # Filtered caps should only contain known values
+    caps = plan.specialist_assignments[0].required_capabilities or []
+    from agentic_concierge.infrastructure.model_profiles import KNOWN_CAPABILITIES
+    for c in caps:
+        assert c in KNOWN_CAPABILITIES, f"Unknown capability {c!r} leaked through"
+
+
+@pytest.mark.asyncio
+async def test_mixed_valid_and_invalid_caps_preserves_valid():
+    """LLM returns mix of valid and invalid caps → valid ones preserved."""
+    resp = _capability_plan_response(
+        required_capabilities=["web_comprehension", "fabricated_cap"],
+        brief="look up info",
+    )
+    plan = await _call_orchestrate(resp, "Look up info")
+    # web_comprehension preserved → research template
+    assert plan.specialist_assignments[0].specialist_id == "research"
+
+
+# ---------------------------------------------------------------------------
+# Issue #4: Degenerate fallback uses quick_answer schema
+# ---------------------------------------------------------------------------
+
+
+def test_degenerate_fallback_uses_quick_answer_schema():
+    """Model-only caps (reasoning) → degenerate → research with quick_answer schema."""
+    sid, tools, role, finish_key = _resolve_pack_from_capabilities(["reasoning"])
+    assert sid == "research"
+    assert finish_key == "quick_answer"
+
+
+def test_degenerate_fallback_instruction_following():
+    """instruction_following only → degenerate → research with quick_answer."""
+    sid, tools, role, finish_key = _resolve_pack_from_capabilities(["instruction_following"])
+    assert sid == "research"
+    assert finish_key == "quick_answer"
