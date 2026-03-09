@@ -1,6 +1,6 @@
 [package]
 name = "concierge-launcher"
-version = "0.3.42"
+version = "0.3.43"
 edition = "2021"
 description = "Rust thin launcher for agentic-concierge"
 license = "MIT"
