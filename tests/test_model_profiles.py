@@ -1,4 +1,4 @@
-"""Tests for the model capability registry (ADR-023)."""
+"""Tests for the model capability registry (ADR-023) and tool composition (ADR-028)."""
 from __future__ import annotations
 
 import pytest
@@ -6,11 +6,16 @@ import pytest
 from agentic_concierge.infrastructure.model_profiles import (
     BUILTIN_PROFILES,
     ModelCapabilityProfile,
+    _BASE_TOOLS,
+    _CAPABILITY_TOOLS,
     _DEFAULT_PROFILE,
     _extract_family,
     _is_vision_model,
     capability_summary,
+    compose_tools_from_capabilities,
+    generate_role_from_capabilities,
     get_profile,
+    infer_finish_schema_from_capabilities,
     match_models,
 )
 
@@ -240,3 +245,134 @@ def test_resolved_llm_has_all_chat_models():
     )
     assert "sqlcoder:15b" in r.all_chat_models
     assert "sqlcoder:15b" not in r.available_models
+
+
+# ---------------------------------------------------------------------------
+# Capability → tool composition (ADR-028)
+# ---------------------------------------------------------------------------
+
+
+class TestComposeToolsFromCapabilities:
+    """Tests for compose_tools_from_capabilities()."""
+
+    def test_web_comprehension_includes_web_tools(self):
+        tools = compose_tools_from_capabilities(["web_comprehension"])
+        assert "web_search" in tools
+        assert "fetch_url" in tools
+
+    def test_code_python_includes_code_tools(self):
+        tools = compose_tools_from_capabilities(["code_python"])
+        assert "shell" in tools
+        assert "write_file" in tools
+        assert "run_tests" in tools
+
+    def test_always_includes_base_tools(self):
+        tools = compose_tools_from_capabilities(["web_comprehension"])
+        for base in _BASE_TOOLS:
+            assert base in tools
+
+    def test_empty_capabilities_returns_base_only(self):
+        tools = compose_tools_from_capabilities([])
+        assert set(tools) == set(_BASE_TOOLS)
+
+    def test_model_only_capability_returns_base_only(self):
+        """reasoning has no tool requirements — only base tools."""
+        tools = compose_tools_from_capabilities(["reasoning"])
+        assert set(tools) == set(_BASE_TOOLS)
+
+    def test_mixed_capabilities_compose_union(self):
+        """code_python + web_comprehension = union of both tool sets + base."""
+        tools = compose_tools_from_capabilities(["code_python", "web_comprehension"])
+        assert "shell" in tools
+        assert "write_file" in tools
+        assert "run_tests" in tools
+        assert "web_search" in tools
+        assert "fetch_url" in tools
+        assert "read_file" in tools
+        assert "list_files" in tools
+
+    def test_result_is_sorted(self):
+        tools = compose_tools_from_capabilities(["code_python", "web_comprehension"])
+        assert tools == sorted(tools)
+
+    def test_result_is_deduplicated(self):
+        """Multiple capabilities may share tools (e.g. shell from code_python and code_rust)."""
+        tools = compose_tools_from_capabilities(["code_python", "code_rust"])
+        assert len(tools) == len(set(tools))
+
+    def test_unknown_capability_ignored(self):
+        """Unknown capabilities are silently ignored (base tools only)."""
+        tools = compose_tools_from_capabilities(["telekinesis"])
+        assert set(tools) == set(_BASE_TOOLS)
+
+    def test_web_comprehension_matches_research_template(self):
+        """web_comprehension should produce exactly the research template's tool set."""
+        from agentic_concierge.infrastructure.specialists.dynamic_pack import PACK_TEMPLATES
+        tools = compose_tools_from_capabilities(["web_comprehension"])
+        assert set(tools) == set(PACK_TEMPLATES["research"].tool_names)
+
+    def test_code_python_matches_engineering_template(self):
+        """code_python should produce exactly the engineering template's tool set."""
+        from agentic_concierge.infrastructure.specialists.dynamic_pack import PACK_TEMPLATES
+        tools = compose_tools_from_capabilities(["code_python"])
+        assert set(tools) == set(PACK_TEMPLATES["engineering"].tool_names)
+
+    def test_code_python_web_matches_no_template(self):
+        """code_python + web_comprehension should NOT match any template."""
+        from agentic_concierge.infrastructure.specialists.dynamic_pack import PACK_TEMPLATES
+        tools = compose_tools_from_capabilities(["code_python", "web_comprehension"])
+        tool_set = set(tools)
+        for tpl in PACK_TEMPLATES.values():
+            assert tool_set != set(tpl.tool_names), f"Unexpected match with {tpl.template_id}"
+
+
+class TestGenerateRoleFromCapabilities:
+    """Tests for generate_role_from_capabilities()."""
+
+    def test_web_comprehension_mentions_web(self):
+        role = generate_role_from_capabilities(["web_comprehension"])
+        assert "web search" in role.lower()
+
+    def test_code_python_mentions_python(self):
+        role = generate_role_from_capabilities(["code_python"])
+        assert "python" in role.lower()
+
+    def test_empty_capabilities_returns_generic(self):
+        role = generate_role_from_capabilities([])
+        assert "specialist agent" in role.lower()
+
+    def test_mixed_capabilities_mentioned(self):
+        role = generate_role_from_capabilities(["code_python", "web_comprehension"])
+        assert "python" in role.lower()
+        assert "web" in role.lower()
+
+    def test_unknown_capability_returns_generic(self):
+        role = generate_role_from_capabilities(["telekinesis"])
+        assert "specialist agent" in role.lower()
+
+
+class TestInferFinishSchemaFromCapabilities:
+    """Tests for infer_finish_schema_from_capabilities()."""
+
+    def test_code_only_returns_code(self):
+        assert infer_finish_schema_from_capabilities(["code_python"]) == "code"
+
+    def test_web_only_returns_quick_answer(self):
+        assert infer_finish_schema_from_capabilities(["web_comprehension"]) == "quick_answer"
+
+    def test_mixed_code_and_web_returns_none(self):
+        assert infer_finish_schema_from_capabilities(["code_python", "web_comprehension"]) is None
+
+    def test_reasoning_only_returns_none(self):
+        assert infer_finish_schema_from_capabilities(["reasoning"]) is None
+
+    def test_code_rust_returns_code(self):
+        assert infer_finish_schema_from_capabilities(["code_rust"]) == "code"
+
+    def test_code_sql_returns_code(self):
+        assert infer_finish_schema_from_capabilities(["code_sql"]) == "code"
+
+    def test_web_plus_summarisation_returns_quick_answer(self):
+        assert infer_finish_schema_from_capabilities(
+            ["web_comprehension", "summarisation"]
+        ) == "quick_answer"

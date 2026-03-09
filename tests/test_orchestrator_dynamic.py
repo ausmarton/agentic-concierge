@@ -1,4 +1,4 @@
-"""Tests for orchestrator dynamic pack composition (tools/role on SpecialistBrief)."""
+"""Tests for orchestrator capability-driven routing (ADR-028) and dynamic packs."""
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
@@ -10,6 +10,8 @@ from agentic_concierge.application.orchestrator import (
     SpecialistBrief,
     _collapse_redundant_dynamic,
     _dedup_same_id,
+    _resolve_pack_from_capabilities,
+    _resolve_specialist_from_capabilities,
     orchestrate_task,
 )
 from agentic_concierge.config import DEFAULT_CONFIG
@@ -22,11 +24,45 @@ from agentic_concierge.infrastructure.ollama import OllamaChatClient
 # ---------------------------------------------------------------------------
 
 
+def _capability_plan_response(
+    required_capabilities: list[str],
+    brief: str = "do the work",
+    finish_schema: str | None = None,
+    tools: list[str] | None = None,
+    role: str | None = None,
+) -> LLMResponse:
+    """Build a create_plan response using capability-driven routing (no specialist_id)."""
+    assignment: dict = {
+        "brief": brief,
+        "required_capabilities": required_capabilities,
+    }
+    if finish_schema:
+        assignment["finish_schema"] = finish_schema
+    if tools:
+        assignment["tools"] = tools
+    if role:
+        assignment["role"] = role
+    return LLMResponse(
+        content=None,
+        tool_calls=[ToolCallRequest(
+            call_id="orch0",
+            tool_name="create_plan",
+            arguments={
+                "assignments": [assignment],
+                "mode": "sequential",
+                "synthesis_required": False,
+                "reasoning": "capability routing",
+            },
+        )],
+    )
+
+
 def _dynamic_plan_response(
     tools: list[str],
     role: str = "A dynamic agent",
     specialist_id: str = "dynamic",
 ) -> LLMResponse:
+    """Build a create_plan response with explicit tools (dynamic pack)."""
     return LLMResponse(
         content=None,
         tool_calls=[ToolCallRequest(
@@ -39,6 +75,7 @@ def _dynamic_plan_response(
                         "brief": "do the work",
                         "tools": tools,
                         "role": role,
+                        "required_capabilities": ["instruction_following"],
                     }
                 ],
                 "mode": "sequential",
@@ -94,24 +131,15 @@ async def test_dynamic_pack_specialist_id():
 
 
 @pytest.mark.asyncio
-async def test_specialist_brief_tools_none_for_template():
-    """Template-based assignments have tools=None by default."""
-    resp = LLMResponse(
-        content=None,
-        tool_calls=[ToolCallRequest(
-            call_id="orch0",
-            tool_name="create_plan",
-            arguments={
-                "assignments": [{"specialist_id": "engineering", "brief": "build it"}],
-                "mode": "sequential",
-                "synthesis_required": False,
-                "reasoning": "standard",
-            },
-        )],
+async def test_specialist_brief_tools_none_for_capability_routing():
+    """Capability-routed assignments have tools=None by default."""
+    plan = await _call_orchestrate(
+        _capability_plan_response(["code_python"], brief="build it"),
+        "build a service",
     )
-    plan = await _call_orchestrate(resp, "build a service")
     assert plan.specialist_assignments[0].tools is None
     assert plan.specialist_assignments[0].role is None
+    assert plan.specialist_assignments[0].specialist_id == "engineering"
 
 
 @pytest.mark.asyncio
@@ -135,6 +163,183 @@ async def test_dynamic_routing_method_is_orchestrator():
         "mixed task",
     )
     assert plan.routing_method == "orchestrator"
+
+
+# ---------------------------------------------------------------------------
+# Capability-driven routing tests (ADR-028)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_web_comprehension_to_research():
+    """web_comprehension capability resolves to research template."""
+    assert _resolve_specialist_from_capabilities(["web_comprehension"]) == "research"
+
+
+def test_resolve_code_python_to_engineering():
+    """code_python capability resolves to engineering template."""
+    assert _resolve_specialist_from_capabilities(["code_python"]) == "engineering"
+
+
+def test_resolve_summarisation_to_research():
+    """summarisation capability resolves to research template."""
+    assert _resolve_specialist_from_capabilities(["summarisation"]) == "research"
+
+
+def test_resolve_unknown_capability_defaults():
+    """Unknown capability falls back to research (degenerate base-tools-only case)."""
+    result = _resolve_specialist_from_capabilities(["telekinesis"])
+    # Unknown caps → base tools only → degenerate → research fallback
+    assert result == "research"
+
+
+# ---------------------------------------------------------------------------
+# _resolve_pack_from_capabilities (full resolution)
+# ---------------------------------------------------------------------------
+
+
+def test_pack_resolution_web_returns_template():
+    """web_comprehension tools match research template → (research, None, None, None)."""
+    sid, tools, role, fs = _resolve_pack_from_capabilities(["web_comprehension"])
+    assert sid == "research"
+    assert tools is None
+    assert role is None
+    assert fs is None
+
+
+def test_pack_resolution_code_returns_template():
+    """code_python tools match engineering template → (engineering, None, None, None)."""
+    sid, tools, role, fs = _resolve_pack_from_capabilities(["code_python"])
+    assert sid == "engineering"
+    assert tools is None
+    assert role is None
+    assert fs is None
+
+
+def test_pack_resolution_mixed_returns_dynamic():
+    """code_python + web_comprehension → no template match → dynamic pack."""
+    sid, tools, role, fs = _resolve_pack_from_capabilities(["code_python", "web_comprehension"])
+    assert sid == "dynamic"
+    assert tools is not None
+    assert "shell" in tools
+    assert "web_search" in tools
+    assert "write_file" in tools
+    assert "fetch_url" in tools
+    assert role is not None
+    assert "python" in role.lower()
+    assert "web" in role.lower()
+
+
+def test_pack_resolution_degenerate_falls_back_to_research():
+    """Only model capabilities (no tool caps) → degenerate → research fallback."""
+    sid, tools, role, fs = _resolve_pack_from_capabilities(["reasoning"])
+    assert sid == "research"
+    assert tools is None
+
+
+def test_pack_resolution_infers_finish_schema():
+    """Dynamic pack infers finish schema from capabilities."""
+    _sid, _tools, _role, fs = _resolve_pack_from_capabilities(
+        ["code_python", "web_comprehension"]
+    )
+    # Mixed → None (no clear inference)
+    assert fs is None
+
+
+@pytest.mark.asyncio
+async def test_capability_routing_web_comprehension():
+    """Integration: web_comprehension → research template via orchestrate_task."""
+    plan = await _call_orchestrate(
+        _capability_plan_response(["web_comprehension"]),
+        "What is the AXP stock price?",
+    )
+    assert len(plan.specialist_assignments) == 1
+    assert plan.specialist_assignments[0].specialist_id == "research"
+
+
+@pytest.mark.asyncio
+async def test_capability_routing_code_python():
+    """Integration: code_python → engineering template via orchestrate_task."""
+    plan = await _call_orchestrate(
+        _capability_plan_response(["code_python"], finish_schema="code"),
+        "Build a REST API with Flask",
+    )
+    assert len(plan.specialist_assignments) == 1
+    assert plan.specialist_assignments[0].specialist_id == "engineering"
+    assert plan.specialist_assignments[0].finish_schema == "code"
+
+
+@pytest.mark.asyncio
+async def test_capability_routing_with_finish_schema():
+    """Capability routing preserves finish_schema from the plan."""
+    plan = await _call_orchestrate(
+        _capability_plan_response(
+            ["web_comprehension"], finish_schema="quick_answer",
+        ),
+        "How much does Amex Platinum cost?",
+    )
+    brief = plan.specialist_assignments[0]
+    assert brief.specialist_id == "research"
+    assert brief.finish_schema == "quick_answer"
+
+
+@pytest.mark.asyncio
+async def test_capability_routing_dynamic_with_tools():
+    """When tools are provided without specialist_id, creates a dynamic pack."""
+    plan = await _call_orchestrate(
+        _capability_plan_response(
+            ["web_comprehension", "code_python"],
+            tools=["web_search", "fetch_url", "shell", "write_file"],
+            role="You are a deployment specialist",
+        ),
+        "Search the web and write a deployment script",
+    )
+    assert len(plan.specialist_assignments) == 1
+    brief = plan.specialist_assignments[0]
+    assert brief.specialist_id == "dynamic"
+    assert brief.tools == ["web_search", "fetch_url", "shell", "write_file"]
+    assert brief.role == "You are a deployment specialist"
+
+
+@pytest.mark.asyncio
+async def test_capability_routing_mixed_creates_dynamic():
+    """Integration: code_python + web_comprehension → dynamic pack (no template match)."""
+    plan = await _call_orchestrate(
+        _capability_plan_response(["code_python", "web_comprehension"]),
+        "Search the web for API docs and implement a client",
+    )
+    assert len(plan.specialist_assignments) == 1
+    brief = plan.specialist_assignments[0]
+    assert brief.specialist_id == "dynamic"
+    assert brief.tools is not None
+    assert "shell" in brief.tools
+    assert "web_search" in brief.tools
+    assert "write_file" in brief.tools
+    assert "fetch_url" in brief.tools
+    assert brief.role is not None
+
+
+@pytest.mark.asyncio
+async def test_backward_compat_specialist_id_still_works():
+    """Legacy: explicit specialist_id is accepted as an override."""
+    resp = LLMResponse(
+        content=None,
+        tool_calls=[ToolCallRequest(
+            call_id="orch0",
+            tool_name="create_plan",
+            arguments={
+                "assignments": [{
+                    "specialist_id": "engineering",
+                    "brief": "build it",
+                    "required_capabilities": ["code_python"],
+                }],
+                "mode": "sequential",
+                "synthesis_required": False,
+                "reasoning": "backward compat",
+            },
+        )],
+    )
+    plan = await _call_orchestrate(resp, "build a service")
+    assert plan.specialist_assignments[0].specialist_id == "engineering"
 
 
 # ---------------------------------------------------------------------------
@@ -197,12 +402,17 @@ async def test_collapse_applied_in_orchestrate_task():
             tool_name="create_plan",
             arguments={
                 "assignments": [
-                    {"specialist_id": "research", "brief": "look up AXP stock price"},
+                    {
+                        "specialist_id": "research",
+                        "brief": "look up AXP stock price",
+                        "required_capabilities": ["web_comprehension"],
+                    },
                     {
                         "specialist_id": "dynamic",
                         "brief": "format the result",
                         "tools": ["web_search"],
                         "role": "formatter",
+                        "required_capabilities": ["summarisation"],
                     },
                 ],
                 "mode": "sequential",
@@ -253,6 +463,42 @@ def test_dedup_noop_single():
     assert len(result) == 1
 
 
+def test_dedup_preserves_dynamic_with_different_tools():
+    """Two dynamic packs with different tool sets are NOT merged."""
+    assignments = [
+        SpecialistBrief(
+            specialist_id="dynamic", brief="write code",
+            tools=["shell", "write_file"], role="Code writer",
+        ),
+        SpecialistBrief(
+            specialist_id="dynamic", brief="search web",
+            tools=["web_search", "fetch_url"], role="Researcher",
+        ),
+    ]
+    result = _dedup_same_id(assignments)
+    assert len(result) == 2
+    assert result[0].tools == ["shell", "write_file"]
+    assert result[1].tools == ["web_search", "fetch_url"]
+
+
+def test_dedup_merges_dynamic_with_same_tools():
+    """Two dynamic packs with identical tool sets ARE merged."""
+    assignments = [
+        SpecialistBrief(
+            specialist_id="dynamic", brief="task A",
+            tools=["web_search", "fetch_url"], role="Agent",
+        ),
+        SpecialistBrief(
+            specialist_id="dynamic", brief="task B",
+            tools=["web_search", "fetch_url"], role="Agent",
+        ),
+    ]
+    result = _dedup_same_id(assignments)
+    assert len(result) == 1
+    assert "task A" in result[0].brief
+    assert "task B" in result[0].brief
+
+
 @pytest.mark.asyncio
 async def test_dedup_applied_in_orchestrate_task():
     """Integration: orchestrate_task deduplicates same-ID specialists."""
@@ -263,8 +509,16 @@ async def test_dedup_applied_in_orchestrate_task():
             tool_name="create_plan",
             arguments={
                 "assignments": [
-                    {"specialist_id": "research", "brief": "look up KO stock price"},
-                    {"specialist_id": "research", "brief": "look up BAC stock price"},
+                    {
+                        "specialist_id": "research",
+                        "brief": "look up KO stock price",
+                        "required_capabilities": ["web_comprehension"],
+                    },
+                    {
+                        "specialist_id": "research",
+                        "brief": "look up BAC stock price",
+                        "required_capabilities": ["web_comprehension"],
+                    },
                 ],
                 "mode": "parallel",
                 "synthesis_required": True,

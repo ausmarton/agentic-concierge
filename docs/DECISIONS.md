@@ -1088,7 +1088,7 @@ reasoning-focused models (phi-4-mini, deepseek-r1-distill) and excludes the doer
 
 ### ADR-028: Capability-Driven Orchestrator — Route by What, Not by Name
 
-**Date:** 2026-03-08
+**Date:** 2026-03-08 (revised 2026-03-09)
 **Status:** Accepted
 
 **Context:**
@@ -1097,26 +1097,41 @@ engineering, research." This forces the LLM to think in template terms rather th
 terms. Adding a new specialist type requires prompt changes.
 
 **Decision:**
-The orchestrator prompt switches to capability-driven language. `create_plan` gets
-`required_capabilities` array per assignment. When capabilities are specified, the system
-(not the LLM) resolves them to template + model via `_resolve_specialist_from_capabilities()`.
-`specialist_id` becomes optional in the schema.
+Capabilities compose tools directly. The routing LLM specifies `required_capabilities`; the
+system composes a tool set from the union of tools needed for all requested capabilities, then
+either matches a template (if the composed set is identical) or builds a dynamic pack.
+
+Template names are internal implementation details — never exposed to the routing LLM.
 
 **Design:**
-- `SpecialistBrief.required_capabilities: Optional[List[str]]`.
-- `create_plan` schema: `required_capabilities` array field; `specialist_id` optional.
-- `_resolve_specialist_from_capabilities()`: scores each template against requested capabilities
-  using `_TEMPLATE_CAPABILITIES` from model_profiles.py; returns best-matching template ID.
-- Orchestrator system prompt updated with capability-driven language and capability catalog.
-- When `required_capabilities` is provided to `_select_specialist_model()`, it overrides
-  template-based inference.
+- `_CAPABILITY_TOOLS` in model_profiles.py: maps each capability to tools it requires
+  (e.g. `web_comprehension → [web_search, fetch_url]`, `code_python → [shell, write_file, run_tests]`).
+  Model-only capabilities (`reasoning`, `summarisation`, `instruction_following`) map to `[]`.
+- `_BASE_TOOLS = [read_file, list_files]`: every specialist gets these.
+- `compose_tools_from_capabilities()`: union of capability tools + base tools.
+- `_resolve_pack_from_capabilities()`: composes tools, checks template match, returns
+  `(specialist_id, tools, role, finish_schema_key)`. Template match → template ID + None fields.
+  No match → `"dynamic"` + composed tools + generated role + inferred schema.
+- `generate_role_from_capabilities()`: composes mission fragments per capability.
+- `infer_finish_schema_from_capabilities()`: code-only→"code", web-only→"quick_answer", mixed→None.
+- `create_plan` schema: `required_capabilities` is **required**, `specialist_id` removed from schema.
+- `_dedup_same_id()`: dynamic packs with different tool sets are not merged (fixes prior bug).
+
+**Examples:**
+- `["web_comprehension"]` → `{web_search, fetch_url, read_file, list_files}` = research template
+- `["code_python"]` → `{shell, write_file, read_file, list_files, run_tests}` = engineering template
+- `["code_python", "web_comprehension"]` → `{shell, write_file, run_tests, web_search, fetch_url, read_file, list_files}` → no template match → dynamic pack with composed tools
+- `["reasoning"]` → `{read_file, list_files}` (degenerate) → research fallback
 
 **Backward compatibility:**
-- Template names still work as `specialist_id` values.
-- When capabilities are not specified, template resolution is unchanged.
-- Fallback behavior unchanged.
+- `specialist_id` still accepted in LLM output as override (legacy/tests).
+- Templates exist as internal implementation — tuned role descriptions and finish schemas.
+- Downstream code (execute_task.py, registry.py) unchanged — `SpecialistBrief.specialist_id`
+  is populated by the system, consumed identically.
+- Enterprise research is config-driven (cross_run_search has no capability mapping).
 
 **Consequences:**
-- The orchestrator describes tasks in capability terms, not template terms.
-- New model families automatically benefit from capability matching without prompt changes.
-- `_select_specialist_model()` respects explicit capabilities from the orchestrator.
+- The orchestrator LLM describes tasks in capability terms, not template terms.
+- Mixed-capability tasks (code + web) automatically get a dynamic pack with all needed tools.
+- New capabilities can be added to `_CAPABILITY_TOOLS` without touching the orchestrator prompt.
+- Templates are just pre-tuned shortcuts for common capability combinations.

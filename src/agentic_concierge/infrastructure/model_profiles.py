@@ -343,6 +343,120 @@ def match_models(
     return ranked[0] if ranked else None
 
 
+# ---------------------------------------------------------------------------
+# Capability → tool composition (ADR-028)
+# ---------------------------------------------------------------------------
+
+# Tools every specialist gets regardless of capabilities.
+_BASE_TOOLS: List[str] = ["read_file", "list_files"]
+
+# Capability → additional tools required to exercise that capability.
+# Model-only capabilities (reasoning, summarisation, instruction_following)
+# map to empty lists — they affect model selection, not tool selection.
+_CAPABILITY_TOOLS: Dict[str, List[str]] = {
+    "web_comprehension": ["web_search", "fetch_url"],
+    "code_python": ["shell", "write_file", "run_tests"],
+    "code_rust": ["shell", "write_file", "run_tests"],
+    "code_sql": ["shell", "write_file"],
+    "reasoning": [],
+    "summarisation": [],
+    "structured_output": [],  # model capability (JSON schema adherence), not tool
+    "instruction_following": [],
+}
+
+# Capability → mission fragment for generating role descriptions.
+_CAPABILITY_MISSION: Dict[str, str] = {
+    "web_comprehension": "find accurate, up-to-date information using web search and URL fetching",
+    "code_python": "write, debug, and test Python code",
+    "code_rust": "write and test Rust code",
+    "code_sql": "write and verify SQL queries",
+    "reasoning": "apply careful logical reasoning to complex problems",
+    "summarisation": "synthesise information into clear, concise summaries",
+    "structured_output": "produce well-structured output following specified formats",
+    "instruction_following": "follow instructions precisely and completely",
+}
+
+
+def compose_tools_from_capabilities(
+    required_capabilities: List[str],
+) -> List[str]:
+    """Compose a tool set from requested capabilities.
+
+    Returns a deduplicated, sorted list of tool names.  Every specialist
+    gets the base tools (read_file, list_files); additional tools are
+    added based on the capability → tools mapping.
+
+    Unknown capabilities are silently ignored (they may still affect
+    model selection via ``match_models()``).
+    """
+    tools = set(_BASE_TOOLS)
+    for cap in required_capabilities:
+        tools.update(_CAPABILITY_TOOLS.get(cap, []))
+    return sorted(tools)
+
+
+def generate_role_from_capabilities(
+    required_capabilities: List[str],
+) -> str:
+    """Generate a role description from requested capabilities.
+
+    Composes mission fragments for each known capability into a coherent
+    role description.  Falls back to a generic description when no
+    fragments match.
+    """
+    fragments = [
+        _CAPABILITY_MISSION[c]
+        for c in required_capabilities
+        if c in _CAPABILITY_MISSION
+    ]
+    if not fragments:
+        return (
+            "You are an autonomous specialist agent. Complete the given task "
+            "using the available tools.\n\n"
+            "## Workflow\n"
+            "1. Understand the task.\n"
+            "2. Use available tools to complete it.\n"
+            "3. Verify your work.\n"
+            "4. Call finish_task when complete with a clear summary."
+        )
+
+    mission = "; ".join(fragments)
+    return (
+        f"You are an autonomous specialist agent. Your mission is to {mission}.\n\n"
+        "## Workflow\n"
+        "1. Understand the task.\n"
+        "2. Use available tools to complete it.\n"
+        "3. Verify your work.\n"
+        "4. Call finish_task when complete with a clear summary.\n\n"
+        "## Important\n"
+        "- Answer the ACTUAL question asked. Do not substitute a different question.\n"
+        "- Base your answer ONLY on information from tool results. Never fabricate.\n"
+        "- Be concise. A simple question deserves a simple answer.\n"
+        "- If you cannot find the answer, say so honestly — do not make one up."
+    )
+
+
+def infer_finish_schema_from_capabilities(
+    required_capabilities: List[str],
+) -> Optional[str]:
+    """Infer the best finish schema key from capabilities.
+
+    Returns a schema key (e.g. ``"code"``, ``"quick_answer"``) or None
+    when the capabilities are ambiguous (caller should use the template
+    default or ``"general"``).
+    """
+    cap_set = set(required_capabilities)
+    has_code = any(c.startswith("code_") for c in cap_set)
+    has_web = "web_comprehension" in cap_set
+
+    if has_code and not has_web:
+        return "code"
+    if has_web and not has_code:
+        return "quick_answer"
+    # Mixed or unclear — let caller decide
+    return None
+
+
 # Capability requirements inferred from specialist templates / tool names.
 _TEMPLATE_CAPABILITIES: Dict[str, Dict[str, float]] = {
     "engineering": {"code_python": 0.7, "structured_output": 0.6},

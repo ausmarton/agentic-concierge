@@ -40,12 +40,11 @@ def test_resolve_summarisation_to_research():
 
 
 def test_resolve_mixed_code_and_web():
-    """When both code and web needed, the template with highest total score wins."""
+    """When both code and web needed, no template covers both → dynamic pack."""
     result = _resolve_specialist_from_capabilities(["code_python", "web_comprehension"])
-    # engineering has code_python=0.7 + web_comprehension=0 = 0.7
-    # research has code_python=0 + web_comprehension=0.7 = 0.7
-    # tie-breaking depends on iteration order; both are valid
-    assert result in ("engineering", "research")
+    # Composed tools = {shell, write_file, run_tests, web_search, fetch_url,
+    # read_file, list_files} → no template matches → "dynamic"
+    assert result == "dynamic"
 
 
 def test_resolve_empty_caps_returns_a_template():

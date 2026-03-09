@@ -1,9 +1,15 @@
 """LLM Orchestrator: decomposes tasks, assigns specialists, plans execution.
 
-The orchestrator can assign predefined specialist templates (engineering,
-research, enterprise_research) or compose dynamic packs by selecting tools
-and describing roles.  When the LLM selects specialist_id="dynamic", it must
-also provide a ``tools`` list and ``role`` description.
+The orchestrator uses **capability-driven routing** (ADR-028).  The routing
+LLM specifies *what the task needs* (``required_capabilities``) and the
+system resolves the best specialist template and model automatically.
+
+Template names (engineering, research, enterprise_research) are internal
+implementation details — they define tool sets and role descriptions but
+are never exposed to the routing LLM.
+
+For tasks requiring a custom tool combination not covered by any template,
+the LLM can provide explicit ``tools`` and ``role`` fields (dynamic packs).
 
 Falls back to the first available template on any error — zero regression.
 """
@@ -56,7 +62,11 @@ class OrchestrationPlan:
 
 
 def _build_orchestrator_tool_def() -> Dict[str, Any]:
-    """Build the create_plan tool definition."""
+    """Build the create_plan tool definition.
+
+    Capability-driven (ADR-028): the LLM specifies what capabilities the
+    task needs; the system resolves the best specialist template and model.
+    """
     return {
         "type": "function",
         "function": {
@@ -74,31 +84,19 @@ def _build_orchestrator_tool_def() -> Dict[str, Any]:
                         "items": {
                             "type": "object",
                             "properties": {
-                                "specialist_id": {
-                                    "type": "string",
-                                    "description": (
-                                        "Specialist ID: one of the available templates "
-                                        "(e.g. 'engineering', 'research', 'enterprise_research') "
-                                        "or 'dynamic' for a custom tool composition."
-                                    ),
-                                },
                                 "brief": {
                                     "type": "string",
                                     "description": "Specific sub-task instructions for this specialist.",
                                 },
-                                "tools": {
+                                "required_capabilities": {
                                     "type": "array",
                                     "items": {"type": "string"},
                                     "description": (
-                                        "Tool names to include when specialist_id='dynamic'. "
-                                        "Ignored for template specialists."
-                                    ),
-                                },
-                                "role": {
-                                    "type": "string",
-                                    "description": (
-                                        "Role description when specialist_id='dynamic'. "
-                                        "Ignored for template specialists."
+                                        "Capabilities this sub-task needs. The system "
+                                        "selects the best specialist and model automatically. "
+                                        "Values: web_comprehension, summarisation, "
+                                        "code_python, code_sql, code_rust, reasoning, "
+                                        "structured_output, instruction_following."
                                     ),
                                 },
                                 "finish_schema": {
@@ -108,25 +106,27 @@ def _build_orchestrator_tool_def() -> Dict[str, Any]:
                                         "Finish schema shape. Use 'quick_answer' for simple "
                                         "factual lookups, 'research_report' for deep research "
                                         "requiring bibliography and evidence, 'code' for "
-                                        "engineering tasks, 'general' for everything else. "
-                                        "Default: template's built-in schema."
+                                        "engineering tasks, 'general' for everything else."
                                     ),
                                 },
-                                "required_capabilities": {
+                                "tools": {
                                     "type": "array",
                                     "items": {"type": "string"},
                                     "description": (
-                                        "Capabilities this sub-task needs. The system selects "
-                                        "the best specialist template and model automatically. "
-                                        "Capabilities: code_python, code_sql, code_rust, "
-                                        "reasoning, web_comprehension, summarisation, "
-                                        "structured_output, instruction_following. "
-                                        "When provided, specialist_id may be omitted (the "
-                                        "system resolves it)."
+                                        "Optional: explicit tool names for a custom pack "
+                                        "(only when no standard capability set covers the "
+                                        "need). Most tasks do NOT need this."
+                                    ),
+                                },
+                                "role": {
+                                    "type": "string",
+                                    "description": (
+                                        "Optional: role description for a custom pack. "
+                                        "Only used when 'tools' is also provided."
                                     ),
                                 },
                             },
-                            "required": ["brief"],
+                            "required": ["brief", "required_capabilities"],
                         },
                     },
                     "mode": {
@@ -165,94 +165,107 @@ def _build_orchestrator_tool_def() -> Dict[str, Any]:
 def _resolve_specialist_from_capabilities(
     required_capabilities: List[str],
 ) -> str:
-    """Resolve capability names to the best matching specialist template.
+    """Resolve capability names to a specialist template ID.
 
-    Scores each template by how many of the required capabilities it covers
-    (using ``_TEMPLATE_CAPABILITIES`` from model_profiles).  Returns the
-    template_id with the highest overlap.  Falls back to ``"research"``
-    (the most general template) when no template matches.
+    Thin wrapper around ``_resolve_pack_from_capabilities`` that returns
+    only the specialist_id.  Kept for backward-compatible test imports.
     """
-    from agentic_concierge.infrastructure.model_profiles import _TEMPLATE_CAPABILITIES
+    result = _resolve_pack_from_capabilities(required_capabilities)
+    return result[0]
 
-    cap_set = set(required_capabilities)
-    best_id = "research"  # default fallback
-    best_score = -1.0
 
-    for template_id, template_caps in _TEMPLATE_CAPABILITIES.items():
-        # Score = number of required capabilities that the template has a non-zero score for
-        score = sum(
-            template_caps.get(cap, 0.0)
-            for cap in cap_set
-        )
-        if score > best_score:
-            best_score = score
-            best_id = template_id
+def _resolve_pack_from_capabilities(
+    required_capabilities: List[str],
+) -> tuple:
+    """Compose a pack configuration from capability requirements.
 
-    return best_id
+    This is the core of capability-driven routing (ADR-028).  Instead of
+    mapping capabilities to a template name, it:
+
+    1. Composes a tool set from the union of tools needed for all requested
+       capabilities (via ``compose_tools_from_capabilities``).
+    2. Checks if the composed tool set exactly matches a known template's
+       tools — if so, uses the template (for its tuned role and defaults).
+    3. Otherwise, builds a dynamic pack specification with a generated role
+       and inferred finish schema.
+
+    Returns:
+        ``(specialist_id, tools, role, finish_schema_key)`` where:
+        - ``specialist_id`` is a template name or ``"dynamic"``
+        - ``tools`` is ``None`` for template matches, else the composed list
+        - ``role`` is ``None`` for template matches, else a generated description
+        - ``finish_schema_key`` is ``None`` for template matches (use default),
+          else an inferred key or ``None``
+    """
+    from agentic_concierge.infrastructure.model_profiles import (
+        compose_tools_from_capabilities,
+        generate_role_from_capabilities,
+        infer_finish_schema_from_capabilities,
+    )
+    from agentic_concierge.infrastructure.specialists.dynamic_pack import PACK_TEMPLATES
+
+    composed_tools = compose_tools_from_capabilities(required_capabilities)
+    composed_set = set(composed_tools)
+
+    # Degenerate case: only base tools (read_file, list_files) — no useful
+    # tool capabilities requested.  Fall back to research (most general).
+    from agentic_concierge.infrastructure.model_profiles import _BASE_TOOLS
+    if composed_set == set(_BASE_TOOLS):
+        return ("research", None, None, None)
+
+    # Check if any template's tool set matches exactly.
+    for tid, tpl in PACK_TEMPLATES.items():
+        if set(tpl.tool_names) == composed_set:
+            return (tid, None, None, None)
+
+    # No template match → dynamic pack with composed tools.
+    role = generate_role_from_capabilities(required_capabilities)
+    finish_key = infer_finish_schema_from_capabilities(required_capabilities)
+    return ("dynamic", composed_tools, role, finish_key)
 
 
 def _build_orchestrator_messages(prompt: str, config: ConciergeConfig) -> List[Dict[str, Any]]:
-    """Build the system + user messages for the orchestrator LLM call."""
+    """Build the system + user messages for the orchestrator LLM call.
+
+    The prompt is capability-driven (ADR-028): it tells the LLM to specify
+    *what the task needs*, not which template to use.
+    """
     from agentic_concierge.infrastructure.specialists.tool_catalog import tool_catalog_summary
-    from agentic_concierge.infrastructure.specialists.dynamic_pack import PACK_TEMPLATES
-
-    specialist_lines = "\n".join(
-        f"- {name}: {spec.description}"
-        for name, spec in config.specialists.items()
-    )
-
-    template_lines = "\n".join(
-        f"- {tid}: tools=[{', '.join(tpl.tool_names)}]"
-        for tid, tpl in PACK_TEMPLATES.items()
-    )
 
     tools_summary = tool_catalog_summary()
 
-    # Capability-driven context (ADR-028)
-    capability_section = (
-        "Available capabilities:\n"
-        "  code_python, code_rust, code_sql — code generation/analysis\n"
-        "  reasoning — complex logic, math, multi-step deduction\n"
-        "  web_comprehension — understanding web content, fact extraction\n"
-        "  summarisation — condensing information into concise output\n"
-        "  structured_output — following schemas, JSON output\n"
-        "  instruction_following — adhering to complex multi-step instructions\n"
-    )
-
     system = (
-        "You are a task orchestrator. Analyse the task and determine what capabilities "
-        "are needed, then assign to specialist agents.\n\n"
-        f"{capability_section}\n"
-        f"Available specialist templates:\n{template_lines}\n\n"
-        f"Available specialists in config:\n{specialist_lines}\n\n"
-        f"Available tools (for dynamic packs):\n{tools_summary}\n\n"
-        "RULES (follow strictly):\n"
-        "1. PREFER CAPABILITIES. For each sub-task, specify required_capabilities so the "
-        "system can automatically select the best specialist template and model. You may "
-        "also set specialist_id explicitly if you know the right template.\n"
-        "2. PREFER ONE SPECIALIST. Most tasks need only one specialist. Only assign "
-        "multiple specialists when the task explicitly asks for INDEPENDENT sub-tasks "
+        "You are a task orchestrator. Analyse the task and decide what capabilities "
+        "each sub-task needs. The system will automatically select the best specialist "
+        "and model for each assignment.\n\n"
+        "Available capabilities (use these in required_capabilities):\n"
+        "  web_comprehension — web search, fetching URLs, extracting facts from pages\n"
+        "  summarisation — condensing information into concise output\n"
+        "  code_python — writing, debugging, or analysing Python code\n"
+        "  code_rust — writing or analysing Rust code\n"
+        "  code_sql — writing SQL queries\n"
+        "  reasoning — complex logic, math, multi-step deduction\n"
+        "  structured_output — following schemas, producing JSON output\n"
+        "  instruction_following — adhering to complex multi-step instructions\n\n"
+        f"Available tools (only needed for custom packs):\n{tools_summary}\n\n"
+        "RULES:\n"
+        "1. ONE SPECIALIST per task. Most tasks need only one assignment. Only create "
+        "multiple assignments when the task explicitly asks for INDEPENDENT sub-tasks "
         "(e.g. 'research X AND build Y').\n"
-        "3. PREFER TEMPLATES OVER DYNAMIC. The research template already has web_search "
-        "and fetch_url — use it for ANY web lookup, question answering, or information "
-        "gathering task. Only use specialist_id='dynamic' when no template covers the "
-        "needed tool combination.\n"
-        "4. NEVER create a dynamic pack without web tools (web_search, fetch_url) if the "
-        "task requires web access.\n"
-        "5. Keep the brief identical to the original task when using a single specialist. "
+        "2. Keep the brief identical to the original task when using a single specialist. "
         "Do not rephrase, narrow, or split the user's question.\n"
-        "6. Use 'sequential' mode only when later specialists need earlier specialists' "
-        "outputs. Use 'parallel' when tasks are truly independent.\n"
-        "7. Set synthesis_required=true only when multiple specialists produce outputs "
-        "that need combining.\n"
-        "8. Set model_tier='fast' for simple tasks (lookups, web searches, quick questions, "
-        "summarisation). Set model_tier='quality' only for complex multi-step tasks, "
-        "code generation, or deep analysis. Default to 'fast' when in doubt.\n"
-        "9. Set finish_schema='quick_answer' for simple factual questions (prices, dates, "
-        "stock quotes, single-fact lookups). Set finish_schema='research_report' only for "
-        "deep research that genuinely needs bibliography and evidence tables. "
-        "Set finish_schema='code' for engineering tasks. Default to the template's "
-        "built-in schema when in doubt (omit the field).\n"
+        "3. Set finish_schema='quick_answer' for simple factual questions (prices, dates, "
+        "stock quotes, single-fact lookups). Set finish_schema='code' for engineering "
+        "tasks. Set finish_schema='research_report' only for deep research that genuinely "
+        "needs bibliography and evidence tables. Omit the field when in doubt.\n"
+        "4. Set model_tier='fast' for simple tasks (lookups, web searches, quick questions). "
+        "Set model_tier='quality' only for complex multi-step engineering, code generation, "
+        "or deep analysis. Default to 'fast'.\n"
+        "5. Only provide 'tools' and 'role' when the standard capability set does not cover "
+        "the need (rare). Most tasks are covered by capabilities alone.\n"
+        "6. Use 'sequential' mode only when later assignments need earlier ones' outputs.\n"
+        "7. Set synthesis_required=true only when multiple assignments produce outputs "
+        "that need combining.\n\n"
         "Call create_plan with the complete assignment plan."
     )
     return [
@@ -343,19 +356,30 @@ def _dedup_same_id(assignments: List[SpecialistBrief]) -> List[SpecialistBrief]:
     When the orchestrator assigns e.g. ``research, research``, collapse them
     into a single ``research`` with merged briefs.  This prevents redundant
     parallel packs doing the same work.
+
+    Dynamic packs (specialist_id="dynamic") are only merged when they have
+    identical tool sets, since different dynamic packs may serve genuinely
+    different purposes.
     """
     seen: dict[str, SpecialistBrief] = {}
     result: List[SpecialistBrief] = []
     for a in assignments:
-        if a.specialist_id in seen:
-            existing = seen[a.specialist_id]
+        # Dynamic packs with different tool sets are NOT duplicates.
+        if a.specialist_id == "dynamic":
+            # Check if we've seen a dynamic pack with the SAME tools.
+            _dedup_key = f"dynamic:{sorted(a.tools or [])}"
+        else:
+            _dedup_key = a.specialist_id
+
+        if _dedup_key in seen:
+            existing = seen[_dedup_key]
             if a.brief and a.brief not in (existing.brief or ""):
                 existing_brief = existing.brief or ""
                 merged = f"{existing_brief}\n\nAlso: {a.brief}" if existing_brief else a.brief
                 object.__setattr__(existing, "brief", merged)
             logger.info("Merged duplicate specialist %r", a.specialist_id)
         else:
-            seen[a.specialist_id] = a
+            seen[_dedup_key] = a
             result.append(a)
     return result
 
@@ -431,40 +455,84 @@ async def orchestrate_task(
     from agentic_concierge.infrastructure.specialists.finish_schemas import FINISH_SCHEMA_KEYS
 
     for a in raw_assignments:
-        sid = a.get("specialist_id", "")
         brief = a.get("brief", "")
-        tools = a.get("tools")
-        role = a.get("role")
+        llm_tools = a.get("tools")
+        llm_role = a.get("role")
         raw_fs = a.get("finish_schema")
         finish_schema = raw_fs if raw_fs in FINISH_SCHEMA_KEYS else None
         raw_caps = a.get("required_capabilities")
         req_caps = raw_caps if isinstance(raw_caps, list) else None
 
-        # Capability-driven resolution (ADR-028): when required_capabilities
-        # are provided and specialist_id is empty/missing, resolve the best
-        # template from the capabilities.
-        if req_caps and not sid:
-            sid = _resolve_specialist_from_capabilities(req_caps)
-            logger.info(
-                "Resolved capabilities %s → specialist %r", req_caps, sid,
-            )
+        # Legacy backward compat: if the LLM (or a test) provides
+        # specialist_id directly, accept it as an override.
+        sid = a.get("specialist_id", "")
 
-        if sid == "dynamic" and tools:
+        if sid:
+            # Explicit specialist_id — use it directly (backward compat).
+            if sid == "dynamic" and llm_tools:
+                assignments.append(SpecialistBrief(
+                    specialist_id="dynamic",
+                    brief=brief,
+                    tools=llm_tools,
+                    role=llm_role,
+                    finish_schema=finish_schema,
+                    required_capabilities=req_caps,
+                ))
+            elif sid in known_ids or sid in known_templates:
+                assignments.append(SpecialistBrief(
+                    specialist_id=sid, brief=brief, finish_schema=finish_schema,
+                    required_capabilities=req_caps,
+                ))
+            else:
+                logger.warning("Orchestrator specified unknown specialist %r; skipping", sid)
+            continue
+
+        # ── Capability-driven resolution (ADR-028) ──────────────────
+        # The LLM specifies what the task needs; the system composes
+        # the tool set and resolves the specialist.
+
+        if llm_tools:
+            # LLM provided explicit tools without specialist_id → dynamic
             assignments.append(SpecialistBrief(
                 specialist_id="dynamic",
                 brief=brief,
-                tools=tools,
-                role=role,
+                tools=llm_tools,
+                role=llm_role,
                 finish_schema=finish_schema,
                 required_capabilities=req_caps,
             ))
-        elif sid in known_ids or sid in known_templates:
+            continue
+
+        effective_caps = req_caps or ["instruction_following"]
+        resolved_sid, resolved_tools, resolved_role, resolved_fs = (
+            _resolve_pack_from_capabilities(effective_caps)
+        )
+        logger.info(
+            "Resolved capabilities %s → specialist=%r tools=%s",
+            effective_caps, resolved_sid, resolved_tools,
+        )
+
+        # Merge: LLM-specified finish_schema takes precedence over inferred.
+        effective_fs = finish_schema or resolved_fs
+
+        if resolved_sid == "dynamic":
             assignments.append(SpecialistBrief(
-                specialist_id=sid, brief=brief, finish_schema=finish_schema,
+                specialist_id="dynamic",
+                brief=brief,
+                tools=resolved_tools,
+                role=resolved_role,
+                finish_schema=effective_fs,
+                required_capabilities=req_caps,
+            ))
+        elif resolved_sid in known_ids or resolved_sid in known_templates:
+            assignments.append(SpecialistBrief(
+                specialist_id=resolved_sid,
+                brief=brief,
+                finish_schema=effective_fs,
                 required_capabilities=req_caps,
             ))
         else:
-            logger.warning("Orchestrator assigned unknown specialist %r; skipping", sid)
+            logger.warning("Resolved unknown specialist %r; skipping", resolved_sid)
 
     if not assignments:
         logger.info("Orchestrator produced no valid assignments; falling back")
