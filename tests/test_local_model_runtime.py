@@ -541,6 +541,54 @@ class TestMultiBackend:
         assert handle.model_id == "llama3.1:8b"
         assert handle.slot.backend == "backend_b"
 
+    @pytest.mark.asyncio
+    async def test_unhealthy_backend_skipped(self):
+        """Unhealthy backend's models are not discovered."""
+        backend_a = FakeBackend("backend_a", models=["qwen2.5:7b"])
+        backend_b = FakeBackend("backend_b", models=["llama3.1:8b"])
+
+        registry = BackendRegistry()
+        registry.register(backend_a, priority=0)
+        registry.register(backend_b, priority=1)
+        # Only mark backend_a as healthy
+        registry._entries["backend_a"].healthy = True
+        registry._entries["backend_b"].healthy = False
+
+        runtime = LocalModelRuntime(registry)
+        handle = await runtime.acquire({"reasoning": 0.5})
+        assert handle.slot.backend == "backend_a"
+
+    @pytest.mark.asyncio
+    async def test_models_across_backends_combined(self):
+        """Inventory shows models from all healthy backends."""
+        backend_a = FakeBackend("backend_a", models=["model-a:7b"])
+        backend_b = FakeBackend("backend_b", models=["model-b:7b"])
+
+        registry = _make_registry((backend_a, 0), (backend_b, 1))
+        runtime = LocalModelRuntime(registry)
+
+        inv = await runtime.inventory()
+        ids = {m.model_id for m in inv}
+        assert ids == {"model-a:7b", "model-b:7b"}
+
+    @pytest.mark.asyncio
+    async def test_load_from_each_backend_independently(self):
+        """Can load models from different backends simultaneously."""
+        backend_a = FakeBackend("backend_a", models=["model-a:7b"])
+        backend_b = FakeBackend("backend_b", models=["model-b:7b"])
+
+        registry = _make_registry((backend_a, 0), (backend_b, 1))
+        runtime = LocalModelRuntime(registry, memory_budget_mb=0)
+
+        h1 = await runtime.acquire({}, prefer_model="model-a:7b", require_tool_calling=False)
+        h2 = await runtime.acquire({}, prefer_model="model-b:7b", require_tool_calling=False)
+
+        assert h1.slot.backend == "backend_a"
+        assert h2.slot.backend == "backend_b"
+        assert len(runtime._slots) == 2
+        assert len(backend_a.load_calls) == 1
+        assert len(backend_b.load_calls) == 1
+
 
 # ---------------------------------------------------------------------------
 # LRU Eviction

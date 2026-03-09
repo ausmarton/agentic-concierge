@@ -15,6 +15,12 @@ backends:
     url: "http://localhost:11434/v1"
   vllm:
     url: "http://localhost:8000/v1"
+  llama_cpp:
+    managed: true
+    binary: "llama-server"
+    model_dir: ""              # directory containing .gguf files; empty = disabled
+    n_gpu_layers: -1           # -1 = all layers on GPU; 0 = CPU only
+    ctx_size: 8192
 
 # Per-tier backend priority (replaces BACKEND_PRIORITY in features.py).
 # resolve_llm() tries backends in this order when the configured primary fails.

@@ -217,9 +217,9 @@ class BackendRegistry:
     ) -> "BackendRegistry":
         """Create a registry with backends configured from ``backends.yaml``.
 
-        Registers an ``OllamaBackend`` for each configured Ollama URL.
-        Backend priority is determined by the tier priority list from
-        ``backends.yaml`` (via ``backend_priority()``).
+        Registers an ``OllamaBackend`` and optionally a ``LlamaCppBackend``
+        (when ``model_dir`` is configured).  Backend priority is determined
+        by the tier priority list from ``backends.yaml``.
 
         Args:
             tier: Profile tier name (e.g. "medium").  If ``None``, defaults
@@ -247,5 +247,30 @@ class BackendRegistry:
         ollama_url = urls.get("ollama", "http://localhost:11434/v1")
         ollama_priority = priority_list.index("ollama") if "ollama" in priority_list else 99
         registry.register(OllamaBackend(base_url=ollama_url), priority=ollama_priority)
+
+        # Register LlamaCppBackend if model_dir is configured
+        try:
+            from agentic_concierge.config.external import load_yaml_config
+            backends_cfg = load_yaml_config("backends.yaml")
+            llama_cfg = backends_cfg.get("backends", {}).get("llama_cpp", {})
+            model_dir = llama_cfg.get("model_dir", "")
+            if model_dir:
+                from agentic_concierge.infrastructure.backends.llama_cpp import LlamaCppBackend
+                llama_priority = (
+                    priority_list.index("llama_cpp")
+                    if "llama_cpp" in priority_list
+                    else len(priority_list)
+                )
+                registry.register(
+                    LlamaCppBackend(
+                        model_dir=model_dir,
+                        binary=llama_cfg.get("binary", "llama-server"),
+                        n_gpu_layers=int(llama_cfg.get("n_gpu_layers", -1)),
+                        ctx_size=int(llama_cfg.get("ctx_size", 8192)),
+                    ),
+                    priority=llama_priority,
+                )
+        except Exception:
+            logger.debug("LlamaCppBackend not registered", exc_info=True)
 
         return registry
