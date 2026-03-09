@@ -149,13 +149,15 @@ class TaskGraph:
                 ready.append(node)
                 continue
             parent = self.nodes[node.parent_id]
-            # Check all siblings that precede this node
+            # Check all siblings that precede this node.
+            # Only "done" unblocks — "failed" blocks subsequent siblings
+            # since they likely depend on the failed sibling's output.
             preceding_done = True
             for sib_id in parent.children:
                 if sib_id == node.id:
                     break
                 sib = self.nodes[sib_id]
-                if not sib.is_terminal:
+                if sib.status != "done":
                     preceding_done = False
                     break
             if preceding_done:
