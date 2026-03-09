@@ -201,7 +201,9 @@ class ContainerisedSpecialistPack:
         if not self._container_id:
             return {"error": "Container is not running (call aopen() first)"}
 
-        cmd: List[str] = args.get("cmd", [])
+        cmd = args.get("cmd", [])
+        if isinstance(cmd, str):
+            cmd = shlex.split(cmd)
         timeout_s: int = int(args.get("timeout_s", SHELL_DEFAULT_TIMEOUT_S))
 
         if not cmd:

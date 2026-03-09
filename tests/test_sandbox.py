@@ -48,3 +48,42 @@ def test_run_cmd_allows_listed_command(tmp_path):
     result = run_cmd(policy, ["python3", "--version"])
     assert result["returncode"] == 0
     assert "Python" in result["stdout"] or "Python" in result["stderr"]
+
+
+# ---------------------------------------------------------------------------
+# Issue #6: LLM sends cmd as string instead of list
+# ---------------------------------------------------------------------------
+
+
+def test_run_shell_coerces_string_cmd_to_list(tmp_path):
+    """LLMs sometimes send cmd as a string; run_shell should split it."""
+    from agentic_concierge.infrastructure.tools.shell_tools import run_shell
+    policy = SandboxPolicy(root=tmp_path)
+    result = run_shell(policy, "python3 --version")
+    assert result["returncode"] == 0
+    assert "Python" in result["stdout"] or "Python" in result["stderr"]
+
+
+def test_run_shell_string_cmd_with_args(tmp_path):
+    """String cmd with arguments should be split correctly."""
+    from agentic_concierge.infrastructure.tools.shell_tools import run_shell
+    policy = SandboxPolicy(root=tmp_path)
+    result = run_shell(policy, "python3 -c 'print(42)'")
+    assert result["returncode"] == 0
+    assert "42" in result["stdout"]
+
+
+def test_run_shell_list_cmd_still_works(tmp_path):
+    """List cmd (correct usage) should still work unchanged."""
+    from agentic_concierge.infrastructure.tools.shell_tools import run_shell
+    policy = SandboxPolicy(root=tmp_path)
+    result = run_shell(policy, ["python3", "--version"])
+    assert result["returncode"] == 0
+
+
+def test_run_shell_string_cmd_blocked_command(tmp_path):
+    """String cmd with disallowed command should still be blocked."""
+    from agentic_concierge.infrastructure.tools.shell_tools import run_shell
+    policy = SandboxPolicy(root=tmp_path)
+    with pytest.raises(PermissionError, match="not allowed"):
+        run_shell(policy, "rm -rf /")
