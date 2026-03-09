@@ -1,0 +1,26 @@
+# Backend configuration — shipped defaults.
+#
+# Override by placing a backends.yaml in ~/.config/concierge/
+# or by setting CONCIERGE_BACKENDS_PATH to a custom file.
+#
+# Only the sections you specify in overrides are merged; all other
+# sections remain at their shipped default values.
+
+backends_version: 1
+
+# Backend endpoints (replaces DEFAULT_BACKEND_URLS in constants.py).
+# Each backend maps to its OpenAI-compatible base URL.
+backends:
+  ollama:
+    url: "http://localhost:11434/v1"
+  vllm:
+    url: "http://localhost:8000/v1"
+
+# Per-tier backend priority (replaces BACKEND_PRIORITY in features.py).
+# resolve_llm() tries backends in this order when the configured primary fails.
+tier_priority:
+  nano: ["inprocess", "ollama", "cloud"]
+  small: ["ollama", "inprocess", "cloud"]
+  medium: ["ollama", "vllm", "inprocess", "cloud"]
+  large: ["vllm", "ollama", "inprocess", "cloud"]
+  server: ["vllm", "ollama", "inprocess", "cloud"]

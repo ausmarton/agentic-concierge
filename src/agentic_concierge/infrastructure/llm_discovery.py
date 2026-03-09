@@ -3,7 +3,7 @@ Discover available LLM backends and models, select the best match, and optionall
 auto-pull a default model so one command works without manual setup.
 
 Strategy: try the configured backend first, then fall back through the profile's
-``BACKEND_PRIORITY`` list so the system always finds *something* that works.
+``backend_priority()`` list so the system always finds *something* that works.
 """
 
 from __future__ import annotations
@@ -21,10 +21,10 @@ import httpx
 
 from agentic_concierge.config import ConciergeConfig, ModelConfig
 from agentic_concierge.config.constants import (
-    DEFAULT_BACKEND_URLS,
     LLM_DISCOVERY_TIMEOUT_S,
     LLM_PULL_TIMEOUT_S,
-    NANO_GGUF_FILENAME,
+    default_backend_urls,
+    nano_gguf_filename,
 )
 
 logger = logging.getLogger(__name__)
@@ -318,7 +318,7 @@ def _nano_model_path() -> str | None:
     """Return path to the nano GGUF model file, or None if not present."""
     try:
         from platformdirs import user_data_path
-        path = user_data_path("agentic-concierge") / "models" / NANO_GGUF_FILENAME
+        path = user_data_path("agentic-concierge") / "models" / nano_gguf_filename()
         return str(path) if path.exists() else None
     except Exception:
         return None
@@ -492,11 +492,12 @@ def _try_backend(
     config: ConciergeConfig,
 ) -> ResolvedLLM | None:
     """Attempt a single backend. Returns ResolvedLLM or None."""
+    urls = default_backend_urls()
     if backend_name == "ollama":
-        url = DEFAULT_BACKEND_URLS["ollama"]
+        url = urls["ollama"]
         return _try_ollama(url, model_cfg, config, auto_start=True)
     elif backend_name == "vllm":
-        url = DEFAULT_BACKEND_URLS["vllm"]
+        url = urls["vllm"]
         return _try_vllm(url, model_cfg)
     elif backend_name == "inprocess":
         return _try_inprocess(model_cfg)
@@ -517,7 +518,7 @@ def resolve_llm(
     Determine which backend and model to use so that one command works.
 
     1. Try the configured primary backend (same as before).
-    2. On failure, iterate through ``BACKEND_PRIORITY[tier]`` filtered by
+    2. On failure, iterate through ``backend_priority()[tier]`` filtered by
        enabled features, skipping the already-tried primary.
     3. Each backend is probed; the first to return models is used.
     4. If all fail, raise ``RuntimeError`` listing each attempt and why it failed.
@@ -643,17 +644,18 @@ def resolve_llm(
             primary_error = f"No backend reachable at {model_cfg.base_url}"
 
     # -----------------------------------------------------------------------
-    # Phase 2: fallback chain — try BACKEND_PRIORITY backends
+    # Phase 2: fallback chain — try backend_priority() backends
     # -----------------------------------------------------------------------
     from agentic_concierge.config.features import (
-        BACKEND_PRIORITY,
         Feature,
         FeatureSet,
+        backend_priority,
     )
 
     tier = _get_profile_tier(config)
     feature_set = FeatureSet.from_profile(tier, config.features)
-    priority = BACKEND_PRIORITY.get(tier, ["ollama", "vllm", "inprocess", "cloud"])
+    bp = backend_priority()
+    priority = bp.get(tier, ["ollama", "vllm", "inprocess", "cloud"])
 
     # Map backend names to Feature flags for filtering
     _BACKEND_FEATURE = {
@@ -674,7 +676,7 @@ def resolve_llm(
             continue
 
         # Skip if the default URL for this backend was already tried as primary
-        default_url = DEFAULT_BACKEND_URLS.get(backend_name, "")
+        default_url = default_backend_urls().get(backend_name, "")
         if backend_name in ("ollama", "vllm") and default_url in tried_urls:
             continue
 

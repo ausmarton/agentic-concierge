@@ -52,19 +52,98 @@ LLM_PULL_TIMEOUT_S: int = 600
 # Backend defaults
 # ---------------------------------------------------------------------------
 
-# Default base URLs for local LLM backends (OpenAI-compatible endpoints).
-DEFAULT_BACKEND_URLS: dict[str, str] = {
+# Loaded lazily from config/defaults/backends.yaml with user override support.
+# Hardcoded fallback values are used only if YAML loading fails entirely.
+
+_FALLBACK_BACKEND_URLS: dict[str, str] = {
     "ollama": "http://localhost:11434/v1",
     "vllm": "http://localhost:8000/v1",
 }
+
+_cached_backend_urls: dict[str, str] | None = None
+
+
+def _load_backend_urls() -> dict[str, str]:
+    """Load backend URLs from backends.yaml ``backends`` section."""
+    global _cached_backend_urls
+    if _cached_backend_urls is not None:
+        return _cached_backend_urls
+    try:
+        from agentic_concierge.config.external import load_yaml_config
+        raw = load_yaml_config("backends.yaml")
+        backends = raw.get("backends", {})
+        if not isinstance(backends, dict):
+            _cached_backend_urls = dict(_FALLBACK_BACKEND_URLS)
+            return _cached_backend_urls
+        urls: dict[str, str] = {}
+        for name, cfg in backends.items():
+            if isinstance(cfg, dict) and "url" in cfg:
+                urls[str(name)] = str(cfg["url"])
+        # Fill any missing backends from fallback.
+        for name, url in _FALLBACK_BACKEND_URLS.items():
+            if name not in urls:
+                urls[name] = url
+        _cached_backend_urls = urls
+    except Exception:
+        _cached_backend_urls = dict(_FALLBACK_BACKEND_URLS)
+    return _cached_backend_urls
+
+
+def reload_backend_config() -> None:
+    """Clear cached backend config — forces re-load on next access."""
+    global _cached_backend_urls
+    _cached_backend_urls = None
+
+
+def default_backend_urls() -> dict[str, str]:
+    """Return backend name → base URL mapping, loaded from backends.yaml."""
+    return dict(_load_backend_urls())
+
 
 # ---------------------------------------------------------------------------
 # Nano / in-process model
 # ---------------------------------------------------------------------------
 
-# Default GGUF model for the inprocess backend (mistral.rs).
-NANO_GGUF_FILENAME: str = "qwen2.5-3b-instruct-q4_k_m.gguf"
-NANO_GGUF_URL: str = (
+# Loaded lazily from config/defaults/models.yaml with user override support.
+# Hardcoded fallback values are used only if YAML loading fails entirely.
+
+_FALLBACK_NANO_GGUF_FILENAME = "qwen2.5-3b-instruct-q4_k_m.gguf"
+_FALLBACK_NANO_GGUF_URL = (
     "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/"
     "qwen2.5-3b-instruct-q4_k_m.gguf"
 )
+
+_cached_nano_config: dict | None = None
+
+
+def _load_nano_config() -> dict:
+    """Load nano section from models.yaml; return dict with gguf_filename/gguf_url."""
+    global _cached_nano_config
+    if _cached_nano_config is not None:
+        return _cached_nano_config
+    try:
+        from agentic_concierge.config.external import load_yaml_config
+        raw = load_yaml_config("models.yaml")
+        nano = raw.get("nano", {})
+        if not isinstance(nano, dict):
+            nano = {}
+        _cached_nano_config = nano
+    except Exception:
+        _cached_nano_config = {}
+    return _cached_nano_config
+
+
+def reload_nano_config() -> None:
+    """Clear cached nano config — forces re-load on next access."""
+    global _cached_nano_config
+    _cached_nano_config = None
+
+
+def nano_gguf_filename() -> str:
+    """Return the nano GGUF model filename, loaded from models.yaml."""
+    return _load_nano_config().get("gguf_filename", _FALLBACK_NANO_GGUF_FILENAME)
+
+
+def nano_gguf_url() -> str:
+    """Return the nano GGUF download URL, loaded from models.yaml."""
+    return _load_nano_config().get("gguf_url", _FALLBACK_NANO_GGUF_URL)

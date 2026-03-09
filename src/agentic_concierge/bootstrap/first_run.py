@@ -75,12 +75,13 @@ async def run(
                 f"Unknown profile {force_profile!r}. Valid values: {valid}"
             ) from None
         # Build a synthetic profile from the forced tier
-        from agentic_concierge.bootstrap.model_advisor import _MODEL_TABLE, _MODEL_CTX_MB
+        from agentic_concierge.bootstrap.model_advisor import _loaded_model_table, _loaded_model_ctx_mb
         import math
-        models = _MODEL_TABLE[tier]
+        models = _loaded_model_table()[tier]
+        model_ctx_mb = _loaded_model_ctx_mb()
         overhead_mb = max(2048, probe.ram_total_mb * 0.15) + 512
         usable_mb = probe.ram_available_mb - overhead_mb
-        max_concurrent = max(1, min(math.floor(usable_mb / _MODEL_CTX_MB), probe.cpu_cores - 1))
+        max_concurrent = max(1, min(math.floor(usable_mb / model_ctx_mb), probe.cpu_cores - 1))
         profile = SystemProfile(
             tier=tier,
             routing_model=models["routing"],
@@ -184,7 +185,10 @@ def _print_profile_panel(probe: "SystemProbe", profile: "SystemProfile") -> None
 
 async def _ensure_nano_model(interactive: bool) -> None:
     """Download the nano GGUF model if not already present."""
-    from agentic_concierge.config.constants import NANO_GGUF_FILENAME, NANO_GGUF_URL
+    from agentic_concierge.config.constants import nano_gguf_filename, nano_gguf_url
+
+    gguf_filename = nano_gguf_filename()
+    gguf_download_url = nano_gguf_url()
 
     try:
         from platformdirs import user_data_path
@@ -193,21 +197,21 @@ async def _ensure_nano_model(interactive: bool) -> None:
         import os
         models_dir = Path(os.path.expanduser("~")) / ".agentic-concierge" / "models"
 
-    gguf_path = models_dir / NANO_GGUF_FILENAME
+    gguf_path = models_dir / gguf_filename
     if gguf_path.exists():
         if interactive:
             _print_status(f"[dim]Nano model already present: {gguf_path}[/dim]")
         return
 
     if interactive:
-        _print_status(f"[bold]Downloading nano model: {NANO_GGUF_FILENAME}[/bold]")
+        _print_status(f"[bold]Downloading nano model: {gguf_filename}[/bold]")
 
     models_dir.mkdir(parents=True, exist_ok=True)
     tmp_path = gguf_path.with_suffix(".download")
     try:
         import httpx
         async with httpx.AsyncClient(timeout=600.0, follow_redirects=True) as client:
-            async with client.stream("GET", NANO_GGUF_URL) as resp:
+            async with client.stream("GET", gguf_download_url) as resp:
                 resp.raise_for_status()
                 total = int(resp.headers.get("content-length", 0))
                 if interactive and total > 0:
@@ -225,7 +229,7 @@ async def _ensure_nano_model(interactive: bool) -> None:
                         TransferSpeedColumn(),
                         TimeRemainingColumn(),
                     )
-                    task_id = progress.add_task(NANO_GGUF_FILENAME, total=total)
+                    task_id = progress.add_task(gguf_filename, total=total)
                     with progress, open(tmp_path, "wb") as f:
                         async for chunk in resp.aiter_bytes(chunk_size=1024 * 256):
                             f.write(chunk)

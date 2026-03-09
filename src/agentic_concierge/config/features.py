@@ -94,13 +94,62 @@ PROFILE_FEATURES: dict[ProfileTier, frozenset[Feature]] = {
 
 # Backend resolution priority per profile tier.
 # resolve_llm() tries backends in this order when the configured primary fails.
-BACKEND_PRIORITY: dict[ProfileTier, list[str]] = {
+# Loaded lazily from config/defaults/backends.yaml with user override support.
+
+_FALLBACK_BACKEND_PRIORITY: dict[ProfileTier, list[str]] = {
     ProfileTier.NANO: ["inprocess", "ollama", "cloud"],
     ProfileTier.SMALL: ["ollama", "inprocess", "cloud"],
     ProfileTier.MEDIUM: ["ollama", "vllm", "inprocess", "cloud"],
     ProfileTier.LARGE: ["vllm", "ollama", "inprocess", "cloud"],
     ProfileTier.SERVER: ["vllm", "ollama", "inprocess", "cloud"],
 }
+
+_cached_backend_priority: dict[ProfileTier, list[str]] | None = None
+
+
+def _load_backend_priority() -> dict[ProfileTier, list[str]]:
+    """Load tier_priority from backends.yaml and map to ProfileTier keys."""
+    global _cached_backend_priority
+    if _cached_backend_priority is not None:
+        return _cached_backend_priority
+    try:
+        from agentic_concierge.config.external import load_yaml_config
+        raw = load_yaml_config("backends.yaml")
+        tier_priority = raw.get("tier_priority")
+        if not isinstance(tier_priority, dict):
+            _cached_backend_priority = dict(_FALLBACK_BACKEND_PRIORITY)
+            return _cached_backend_priority
+
+        tier_name_to_enum = {t.name.lower(): t for t in ProfileTier}
+        result: dict[ProfileTier, list[str]] = {}
+        for tier_name, backends in tier_priority.items():
+            tier = tier_name_to_enum.get(tier_name.lower())
+            if tier is None:
+                continue
+            if not isinstance(backends, list):
+                continue
+            result[tier] = [str(b) for b in backends]
+
+        # Fill any missing tiers from fallback.
+        for tier in ProfileTier:
+            if tier not in result:
+                result[tier] = list(_FALLBACK_BACKEND_PRIORITY[tier])
+        _cached_backend_priority = result
+    except Exception:
+        _cached_backend_priority = dict(_FALLBACK_BACKEND_PRIORITY)
+    return _cached_backend_priority
+
+
+def reload_backend_priority() -> None:
+    """Clear cached backend priority — forces re-load on next access."""
+    global _cached_backend_priority
+    _cached_backend_priority = None
+
+
+def backend_priority() -> dict[ProfileTier, list[str]]:
+    """Return tier → backend priority list, loaded from backends.yaml."""
+    return dict(_load_backend_priority())
+
 
 
 class FeatureDisabledError(RuntimeError):

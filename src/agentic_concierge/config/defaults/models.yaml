@@ -1,0 +1,42 @@
+# Model recommendations and nano config — shipped defaults.
+#
+# Override by placing a models.yaml in ~/.config/concierge/
+# or by setting CONCIERGE_MODELS_PATH to a custom file.
+#
+# Only the sections you specify in overrides are merged; all other
+# sections remain at their shipped default values.
+
+catalog_version: 1
+
+# Per-tier model recommendations (replaces _MODEL_TABLE in model_advisor.py).
+# Each tier maps to {routing, fast, quality} model names.
+# All recommended models must support native tool calling.
+tier_models:
+  nano:
+    routing: "qwen2.5:0.5b"
+    fast: "qwen2.5:3b"
+    quality: "phi3:mini"
+  small:
+    routing: "qwen2.5:0.5b"
+    fast: "qwen2.5:7b"
+    quality: "qwen2.5:7b"
+  medium:
+    routing: "qwen2.5:0.5b"
+    fast: "qwen2.5:7b"
+    quality: "qwen2.5:14b"
+  large:
+    routing: "qwen2.5:0.5b"
+    fast: "qwen2.5:14b"
+    quality: "qwen2.5:32b"
+  server:
+    routing: "qwen2.5:0.5b"
+    fast: "qwen2.5:32b"
+    quality: "qwen2.5:72b"
+
+# Nano model for bootstrap/in-process inference (replaces NANO_GGUF_* in constants.py).
+nano:
+  gguf_filename: "qwen2.5-3b-instruct-q4_k_m.gguf"
+  gguf_url: "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf"
+
+# Approximate RAM each model needs for its KV-cache context window (MB).
+model_ctx_mb: 2048

@@ -5,12 +5,12 @@ from __future__ import annotations
 import pytest
 
 from agentic_concierge.config.features import (
-    BACKEND_PRIORITY,
     Feature,
     FeatureDisabledError,
     FeatureSet,
     PROFILE_FEATURES,
     ProfileTier,
+    backend_priority,
 )
 
 
@@ -158,7 +158,7 @@ def test_browser_in_large_and_server_features():
 
 
 # ---------------------------------------------------------------------------
-# Adaptive backend resolution: BACKEND_PRIORITY and SERVER profile
+# Adaptive backend resolution: backend_priority() and SERVER profile
 # ---------------------------------------------------------------------------
 
 def test_server_profile_includes_ollama():
@@ -167,7 +167,8 @@ def test_server_profile_includes_ollama():
 
 
 def test_backend_priority_all_tiers():
-    """BACKEND_PRIORITY has entries for every ProfileTier."""
+    """backend_priority() has entries for every ProfileTier."""
+    bp = backend_priority()
     for tier in ProfileTier:
-        assert tier in BACKEND_PRIORITY, f"Missing BACKEND_PRIORITY for {tier.value}"
-        assert len(BACKEND_PRIORITY[tier]) >= 2, f"BACKEND_PRIORITY[{tier.value}] too short"
+        assert tier in bp, f"Missing backend_priority for {tier.value}"
+        assert len(bp[tier]) >= 2, f"backend_priority[{tier.value}] too short"
