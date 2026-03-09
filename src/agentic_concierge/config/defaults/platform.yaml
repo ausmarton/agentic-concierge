@@ -1,0 +1,34 @@
+# Platform profiles: hardware-adaptive backend configuration.
+#
+# Auto-detected at runtime via detect_platform(), but can be overridden here
+# or via ~/.config/concierge/platform.yaml or CONCIERGE_PLATFORM_PATH env var.
+#
+# Each profile specifies:
+#   backend_env:          env vars applied to backend processes
+#   preferred_backends:   backend preference order (overrides tier_priority)
+#   notes:                human-readable explanation
+
+platform_version: 1
+
+profiles:
+  strix-halo:
+    backend_env:
+      OLLAMA_VULKAN: "1"
+      HIP_VISIBLE_DEVICES: "-1"
+    preferred_backends: ["ollama", "llama_cpp"]
+    notes: "AMD Strix Halo APU — ROCm/HIP broken on RDNA 3.5; Vulkan required"
+
+  apple-silicon:
+    backend_env: {}
+    preferred_backends: ["mlx", "ollama"]
+    notes: "Apple Silicon — Metal acceleration via MLX or Ollama"
+
+  nvidia-cuda:
+    backend_env: {}
+    preferred_backends: ["vllm", "ollama", "llama_cpp"]
+    notes: "NVIDIA GPU — CUDA acceleration via vLLM or Ollama"
+
+  generic:
+    backend_env: {}
+    preferred_backends: ["ollama"]
+    notes: "No GPU detected or unknown hardware"
