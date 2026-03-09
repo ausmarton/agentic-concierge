@@ -1,0 +1,14 @@
+# Shipped default configuration files for agentic-concierge.
+#
+# These files are bundled with the package and loaded automatically.
+# Users can override any value by placing a file with the same name
+# in ~/.config/concierge/ (or $XDG_CONFIG_HOME/concierge/).
+#
+# Files in this directory:
+#   model_profiles.yaml   - Model capability profiles (Issue #8)
+#   models.yaml           - Model recommendations per tier (Issue #9)
+#   backends.yaml         - Backend URLs and priorities (Issue #10)
+#   templates/            - Specialist pack templates (Issue #11)
+#
+# This README file is not loaded by the config system.
+_readme: true
