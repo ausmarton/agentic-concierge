@@ -281,11 +281,16 @@ def match_models(
     if not candidates:
         return None
 
+    # Always filter out vision/multimodal models — they are designed for
+    # image input and perform poorly on text-only tool-calling tasks.
+    non_vision = [m for m in candidates if not _is_vision_model(m)]
+    if non_vision:
+        candidates = non_vision
+
     if require_tool_calling:
         tc_candidates = [
             m for m in candidates
             if get_profile(m, overrides).supports_tool_calling
-            and not _is_vision_model(m)
         ]
         if tc_candidates:
             candidates = tc_candidates

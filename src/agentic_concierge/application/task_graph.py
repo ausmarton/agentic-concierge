@@ -51,6 +51,12 @@ class TaskNode:
     required_tools: List[str] = field(default_factory=list)
     finish_schema_key: str = "general"
 
+    # Synthesis flag: when True, this node combines results from preceding
+    # siblings.  Synthesis nodes skip Gate 1 (must-use-tool) and plain-text
+    # re-prompting because their job is to reason over existing data, not
+    # gather new data.
+    is_synthesis: bool = False
+
     # Results
     result: Optional[Dict[str, Any]] = None
     critique: Optional[str] = None
@@ -96,6 +102,7 @@ class TaskGraph:
         required_capabilities: Optional[List[str]] = None,
         required_tools: Optional[List[str]] = None,
         finish_schema_key: str = "general",
+        is_synthesis: bool = False,
     ) -> TaskNode:
         """Add a child node under *parent_id*.  Returns the new node."""
         parent = self.nodes.get(parent_id)
@@ -110,6 +117,7 @@ class TaskGraph:
             required_capabilities=required_capabilities or [],
             required_tools=required_tools or [],
             finish_schema_key=finish_schema_key,
+            is_synthesis=is_synthesis,
             depth=parent.depth + 1,
         )
         parent.children.append(nid)

@@ -248,6 +248,23 @@ def build_leaf_executor(ctx: LeafExecutionContext):
             except Exception:
                 pass
 
+        # Synthesis nodes skip Gate 1 (must-use-tool) and plain-text
+        # re-prompting because their job is to reason over existing data.
+        # Auto-detect: if the planner marked it OR it has context from
+        # completed siblings and only reasoning capabilities.
+        _is_synth = getattr(node, "is_synthesis", False)
+        if not _is_synth and node.parent_id is not None:
+            _has_done_siblings = any(
+                graph.nodes[sib_id].status == "done"
+                for sib_id in graph.nodes[node.parent_id].children
+                if sib_id != node.id and sib_id in graph.nodes
+            )
+            if _has_done_siblings:
+                _SYNTHESIS_CAPS = {"reasoning", "summarisation", "structured_output",
+                                   "instruction_following"}
+                if node.required_capabilities and set(node.required_capabilities).issubset(_SYNTHESIS_CAPS):
+                    _is_synth = True
+
         payload = await _execute_pack_loop(
             pack=pack,
             messages=messages,
@@ -269,6 +286,7 @@ def build_leaf_executor(ctx: LeafExecutionContext):
             workspace_path=ctx.workspace_path,
             config=ctx.config,
             finish_schema_key=finish_schema_key,
+            is_synthesis=_is_synth,
         )
 
         # Store result for context forwarding

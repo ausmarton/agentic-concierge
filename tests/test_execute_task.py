@@ -1006,3 +1006,214 @@ async def test_timeout_no_smaller_model_raises(tmp_path):
             max_steps=5,
             available_models=["qwen2.5:3b"],
         )
+
+
+# ---------------------------------------------------------------------------
+# Synthesis node tests (is_synthesis=True)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_synthesis_skips_gate1(tmp_path):
+    """is_synthesis=True: finish_task accepted without prior tool call."""
+    from agentic_concierge.application.execute_task import _execute_pack_loop
+    from agentic_concierge.config.schema import ModelConfig
+    from unittest.mock import MagicMock
+
+    async def mock_chat(*, messages, model, tools, temperature=0.1, top_p=0.9, max_tokens=2048):
+        return LLMResponse(
+            content=None,
+            tool_calls=[ToolCallRequest(
+                call_id="c1", tool_name="finish_task",
+                arguments={"summary": "Synthesis result"},
+            )],
+        )
+
+    chat_client = MagicMock()
+    chat_client.chat = AsyncMock(side_effect=mock_chat)
+    del chat_client.pop_events
+
+    run_repository = FileSystemRunRepository(workspace_root=str(tmp_path))
+    run_id, run_dir, workspace_path = run_repository.create_run()
+    config = load_config()
+    # Use general schema (requires only "summary") to isolate Gate 1 behavior
+    pack = ConfigSpecialistRegistry(config).get_pack(
+        "research", workspace_path, False, finish_schema_key="general",
+    )
+    model_cfg = ModelConfig(base_url="http://localhost:11434/v1", model="qwen2.5:7b")
+    messages = [
+        {"role": "system", "content": pack.system_prompt},
+        {"role": "user", "content": "Synthesize results"},
+    ]
+
+    payload = await _execute_pack_loop(
+        pack=pack,
+        messages=messages,
+        model_cfg=model_cfg,
+        chat_client=chat_client,
+        run_repository=run_repository,
+        run_id=run_id,
+        max_steps=5,
+        is_synthesis=True,
+    )
+
+    assert payload["action"] == "final"
+    assert payload["summary"] == "Synthesis result"
+    # Only 1 LLM call (no gate rejection loop)
+    assert chat_client.chat.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_synthesis_accepts_plain_text(tmp_path):
+    """is_synthesis=True: plain text response accepted immediately as payload."""
+    from agentic_concierge.application.execute_task import _execute_pack_loop
+    from agentic_concierge.config.schema import ModelConfig
+    from unittest.mock import MagicMock
+
+    async def mock_chat(*, messages, model, tools, temperature=0.1, top_p=0.9, max_tokens=2048):
+        return LLMResponse(content="RR.L pays 0.10 while HSBA.L pays 0.50", tool_calls=[])
+
+    chat_client = MagicMock()
+    chat_client.chat = AsyncMock(side_effect=mock_chat)
+    del chat_client.pop_events
+
+    run_repository = FileSystemRunRepository(workspace_root=str(tmp_path))
+    run_id, run_dir, workspace_path = run_repository.create_run()
+    config = load_config()
+    pack = ConfigSpecialistRegistry(config).get_pack("engineering", workspace_path, False)
+    model_cfg = ModelConfig(base_url="http://localhost:11434/v1", model="qwen2.5:7b")
+    messages = [
+        {"role": "system", "content": pack.system_prompt},
+        {"role": "user", "content": "Compare dividends"},
+    ]
+
+    payload = await _execute_pack_loop(
+        pack=pack,
+        messages=messages,
+        model_cfg=model_cfg,
+        chat_client=chat_client,
+        run_repository=run_repository,
+        run_id=run_id,
+        max_steps=5,
+        is_synthesis=True,
+    )
+
+    assert payload["action"] == "final"
+    assert "RR.L" in payload["summary"]
+    # Only 1 LLM call (no re-prompting)
+    assert chat_client.chat.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_non_synthesis_still_rejects_early_finish(tmp_path):
+    """is_synthesis=False (default): finish_task without tool use is still rejected."""
+    from agentic_concierge.application.execute_task import _execute_pack_loop
+    from agentic_concierge.config.schema import ModelConfig
+    from unittest.mock import MagicMock
+
+    call_count = 0
+
+    async def mock_chat(*, messages, model, tools, temperature=0.1, top_p=0.9, max_tokens=2048):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Try finish without tools
+            return LLMResponse(
+                content=None,
+                tool_calls=[ToolCallRequest(
+                    call_id="c1", tool_name="finish_task",
+                    arguments={"summary": "Done"},
+                )],
+            )
+        if call_count == 2:
+            # Use a tool
+            return _tool_response("list_files", call_id="c2")
+        # Then finish
+        return _finish_response(call_id="c3")
+
+    chat_client = MagicMock()
+    chat_client.chat = AsyncMock(side_effect=mock_chat)
+    del chat_client.pop_events
+
+    run_repository = FileSystemRunRepository(workspace_root=str(tmp_path))
+    run_id, run_dir, workspace_path = run_repository.create_run()
+    config = load_config()
+    pack = ConfigSpecialistRegistry(config).get_pack("engineering", workspace_path, False)
+    model_cfg = ModelConfig(base_url="http://localhost:11434/v1", model="qwen2.5:7b")
+    messages = [
+        {"role": "system", "content": pack.system_prompt},
+        {"role": "user", "content": "Do work"},
+    ]
+
+    payload = await _execute_pack_loop(
+        pack=pack,
+        messages=messages,
+        model_cfg=model_cfg,
+        chat_client=chat_client,
+        run_repository=run_repository,
+        run_id=run_id,
+        max_steps=10,
+    )
+
+    # Gate 1 rejected the first call, then tool, then finish succeeded
+    assert call_count == 3
+    assert payload["action"] == "final"
+
+
+# ---------------------------------------------------------------------------
+# Gate-rejection loop detection tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_gate_rejection_loop_force_accepts(tmp_path):
+    """After _MAX_GATE_REJECTIONS identical finish_task rejections, force-accept."""
+    from agentic_concierge.application.execute_task import _execute_pack_loop, _MAX_GATE_REJECTIONS
+    from agentic_concierge.config.schema import ModelConfig
+    from unittest.mock import MagicMock
+
+    call_count = 0
+
+    async def mock_chat(*, messages, model, tools, temperature=0.1, top_p=0.9, max_tokens=2048):
+        nonlocal call_count
+        call_count += 1
+        # Always try finish_task with the same args (no tools called)
+        return LLMResponse(
+            content=None,
+            tool_calls=[ToolCallRequest(
+                call_id=f"c{call_count}", tool_name="finish_task",
+                arguments={"summary": "Synthesized comparison"},
+            )],
+        )
+
+    chat_client = MagicMock()
+    chat_client.chat = AsyncMock(side_effect=mock_chat)
+    del chat_client.pop_events
+
+    run_repository = FileSystemRunRepository(workspace_root=str(tmp_path))
+    run_id, run_dir, workspace_path = run_repository.create_run()
+    config = load_config()
+    # Use general schema (requires only "summary") to isolate Gate 1 behavior
+    pack = ConfigSpecialistRegistry(config).get_pack(
+        "research", workspace_path, False, finish_schema_key="general",
+    )
+    model_cfg = ModelConfig(base_url="http://localhost:11434/v1", model="qwen2.5:7b")
+    messages = [
+        {"role": "system", "content": pack.system_prompt},
+        {"role": "user", "content": "Compare things"},
+    ]
+
+    payload = await _execute_pack_loop(
+        pack=pack,
+        messages=messages,
+        model_cfg=model_cfg,
+        chat_client=chat_client,
+        run_repository=run_repository,
+        run_id=run_id,
+        max_steps=20,
+    )
+
+    # Force-accepts on the Nth call when sig count reaches _MAX_GATE_REJECTIONS
+    assert call_count == _MAX_GATE_REJECTIONS
+    assert payload["action"] == "final"
+    assert payload["summary"] == "Synthesized comparison"

@@ -231,13 +231,44 @@ def test_match_models_vision_model_not_selected_as_reviewer():
     assert result == "qwen2.5:32b"
 
 
-def test_match_models_vision_allowed_when_no_tool_calling_required():
-    """Vision models should be allowed when require_tool_calling=False."""
+def test_match_models_vision_excluded_even_without_tool_calling():
+    """Vision models are excluded even when require_tool_calling=False."""
+    result = match_models(
+        ["qwen2.5:7b", "qwen3-vl:32b"],
+        require_tool_calling=False,
+    )
+    # Vision model filtered; non-vision model selected
+    assert result == "qwen2.5:7b"
+
+
+def test_match_models_vision_only_fallback():
+    """When only vision models exist, they're used as fallback."""
     result = match_models(
         ["qwen3-vl:32b"],
         require_tool_calling=False,
     )
+    # Fallback: when filtering removes all candidates, keep the originals
     assert result == "qwen3-vl:32b"
+
+
+def test_match_models_vision_excluded_for_consult_reasoning():
+    """consult_specialist_model(specialty='reasoning') should not pick vision models."""
+    result = match_models(
+        ["qwen2.5:7b", "qwen3-vl:32b"],
+        required_capabilities={"reasoning": 0.8},
+        require_tool_calling=False,  # consult uses this
+    )
+    assert result == "qwen2.5:7b"
+
+
+def test_match_models_vision_excluded_for_consult_code():
+    """consult_specialist_model(specialty='code') should not pick vision models."""
+    result = match_models(
+        ["qwen2.5-coder:7b", "qwen3-vl:32b"],
+        required_capabilities={"code_python": 0.7},
+        require_tool_calling=False,
+    )
+    assert result == "qwen2.5-coder:7b"
 
 
 def test_resolved_llm_has_all_chat_models():

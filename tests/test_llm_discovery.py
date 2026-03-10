@@ -420,36 +420,75 @@ def test_resolve_llm_primary_success_sets_resolved_backend():
 # ---------------------------------------------------------------------------
 
 def test_select_model_closest_distance():
-    """preferred=14b, available=[0.5b, 8b, 32b] -> picks 8b (distance=6, not 32b=18)."""
+    """preferred=14b, available=[0.5b, 8b, 32b] -> picks 32b (upgrade preferred over downgrade)."""
     models = [
         {"name": "qwen2.5:0.5b", "model": "qwen2.5:0.5b", "details": {"family": "qwen2.5", "parameter_size": "0.5B"}},
         {"name": "qwen2.5:8b", "model": "qwen2.5:8b", "details": {"family": "qwen2.5", "parameter_size": "8B"}},
         {"name": "qwen2.5:32b", "model": "qwen2.5:32b", "details": {"family": "qwen2.5", "parameter_size": "32B"}},
     ]
     selected = select_model("qwen2.5:14b", models, is_ollama=True)
-    assert selected == "qwen2.5:8b"
+    # 8b log-dist=0.56+0.4=0.96 (downgrade), 32b log-dist=0.83 (upgrade) → 32b wins
+    assert selected == "qwen2.5:32b"
 
 
 def test_select_model_log_scale_prefers_closer_ratio():
-    """Log-scale: 5b (2x from 10b) is closer than 40b (4x from 10b)."""
+    """Log-scale with downgrade penalty: 5b has penalty, 40b doesn't."""
     models = [
         {"name": "qwen2.5:5b", "model": "qwen2.5:5b", "details": {"family": "qwen2.5", "parameter_size": "5B"}},
         {"name": "qwen2.5:40b", "model": "qwen2.5:40b", "details": {"family": "qwen2.5", "parameter_size": "40B"}},
     ]
     selected = select_model("qwen2.5:10b", models, is_ollama=True)
-    # log(5/10)=0.69, log(40/10)=1.39 -> 5b is closer
+    # 5b: log(5/10)=0.69 + 0.4 penalty = 1.09; 40b: log(40/10)=1.39 → 5b still closer
     assert selected == "qwen2.5:5b"
 
 
 def test_select_model_closest_same_family_first():
-    """Same-family models preferred, but now by closest distance within family."""
+    """Same-family models preferred; within family, upgrade preferred over downgrade."""
     models = [
         {"name": "qwen2.5:8b", "model": "qwen2.5:8b", "details": {"family": "qwen2.5", "parameter_size": "8B"}},
         {"name": "qwen2.5:32b", "model": "qwen2.5:32b", "details": {"family": "qwen2.5", "parameter_size": "32B"}},
         {"name": "llama3.1:14b", "model": "llama3.1:14b", "details": {"family": "llama", "parameter_size": "14B"}},
     ]
-    # llama 14b is exact distance=0, but qwen family is preferred; within qwen, 8b (d=6) < 32b (d=18)
+    # llama 14b is exact distance=0, but qwen family is preferred;
+    # within qwen, 32b (upgrade, d=0.83) beats 8b (downgrade, d=0.56+0.4=0.96)
     selected = select_model("qwen2.5:14b", models, is_ollama=True)
+    assert selected == "qwen2.5:32b"
+
+
+# ---------------------------------------------------------------------------
+# Downgrade penalty tests — verify that upgrade is preferred over downgrade
+# ---------------------------------------------------------------------------
+
+
+def test_select_model_prefers_upgrade_over_downgrade():
+    """14b preferred, 7b and 32b available -> 32b wins (upgrade preferred)."""
+    models = [
+        {"name": "qwen2.5:7b", "model": "qwen2.5:7b", "details": {"family": "qwen2.5", "parameter_size": "7B"}},
+        {"name": "qwen2.5:32b", "model": "qwen2.5:32b", "details": {"family": "qwen2.5", "parameter_size": "32B"}},
+    ]
+    selected = select_model("qwen2.5:14b", models, is_ollama=True)
+    assert selected == "qwen2.5:32b"
+
+
+def test_select_model_large_downgrade_loses_to_small_upgrade():
+    """14b preferred: 72b (5x upgrade) still beats 3b (4.7x downgrade)."""
+    models = [
+        {"name": "qwen2.5:3b", "model": "qwen2.5:3b", "details": {"family": "qwen2.5", "parameter_size": "3B"}},
+        {"name": "qwen2.5:72b", "model": "qwen2.5:72b", "details": {"family": "qwen2.5", "parameter_size": "72B"}},
+    ]
+    selected = select_model("qwen2.5:14b", models, is_ollama=True)
+    # 3b: log(3/14)=1.54+0.4=1.94; 72b: log(72/14)=1.64 → 72b wins
+    assert selected == "qwen2.5:72b"
+
+
+def test_select_model_very_close_downgrade_still_wins():
+    """10b preferred: 8b (small downgrade) beats 100b (large upgrade)."""
+    models = [
+        {"name": "qwen2.5:8b", "model": "qwen2.5:8b", "details": {"family": "qwen2.5", "parameter_size": "8B"}},
+        {"name": "qwen2.5:100b", "model": "qwen2.5:100b", "details": {"family": "qwen2.5", "parameter_size": "100B"}},
+    ]
+    selected = select_model("qwen2.5:10b", models, is_ollama=True)
+    # 8b: log(8/10)=0.22+0.4=0.62; 100b: log(100/10)=2.30 → 8b wins (it's very close)
     assert selected == "qwen2.5:8b"
 
 

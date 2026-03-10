@@ -411,3 +411,27 @@ class TestInspection:
         assert g.node_count() == 1
         g.add_child("r", "A", node_id="a")
         assert g.node_count() == 2
+
+
+# ---------------------------------------------------------------------------
+# Synthesis flag
+# ---------------------------------------------------------------------------
+
+
+class TestSynthesisFlag:
+
+    def test_default_is_false(self):
+        node = TaskNode(id="n", description="test")
+        assert node.is_synthesis is False
+
+    def test_add_child_with_synthesis(self):
+        g = TaskGraph.from_root("Task", node_id="r")
+        g.add_child("r", "Research A", node_id="a")
+        synth = g.add_child("r", "Compare A and B", node_id="s", is_synthesis=True)
+        assert synth.is_synthesis is True
+        assert g.nodes["a"].is_synthesis is False
+
+    def test_add_child_without_synthesis(self):
+        g = TaskGraph.from_root("Task", node_id="r")
+        child = g.add_child("r", "Work node", node_id="w")
+        assert child.is_synthesis is False

@@ -76,6 +76,15 @@ _DECOMPOSE_TOOL_DEF: Dict[str, Any] = {
                                 "enum": ["quick_answer", "research_report", "code", "general"],
                                 "description": "Output format for this subtask.",
                             },
+                            "is_synthesis": {
+                                "type": "boolean",
+                                "description": (
+                                    "Set true when this subtask combines, compares, or "
+                                    "summarises results from preceding subtasks rather "
+                                    "than gathering new data. Synthesis subtasks should "
+                                    "appear after the data-gathering subtasks they depend on."
+                                ),
+                            },
                         },
                         "required": ["description", "required_capabilities"],
                     },
@@ -237,12 +246,14 @@ def _parse_decomposition(
         fs = st.get("finish_schema", "general")
         if fs not in _KNOWN_FINISH_SCHEMAS:
             fs = "general"
+        synthesis = bool(st.get("is_synthesis", False))
         graph.add_child(
             graph.root_id,
             desc,
             required_capabilities=caps if isinstance(caps, list) else [],
             required_tools=tools if isinstance(tools, list) else [],
             finish_schema_key=fs,
+            is_synthesis=synthesis,
         )
 
     return graph

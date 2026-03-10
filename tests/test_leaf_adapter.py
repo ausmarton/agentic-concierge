@@ -314,3 +314,174 @@ class TestLeafExecutionContext:
         ctx = _make_context()
         ctx.completed_results["n1"] = {"answer": "42"}
         assert ctx.completed_results["n1"]["answer"] == "42"
+
+
+# ---------------------------------------------------------------------------
+# Synthesis auto-detection
+# ---------------------------------------------------------------------------
+
+
+class TestSynthesisAutoDetection:
+    """Tests for synthesis flag detection in _execute_leaf.
+
+    The leaf adapter passes ``is_synthesis`` to ``_execute_pack_loop``.
+    It's either explicitly set on the node or auto-detected when:
+    - node has done siblings AND
+    - all required_capabilities are in the reasoning-only set.
+    """
+
+    @pytest.mark.asyncio
+    async def test_explicit_synthesis_flag_passed(self):
+        """Node with is_synthesis=True passes it to pack loop."""
+        mock_loop = AsyncMock(return_value={"summary": "combined"})
+        ctx = _make_context(pack_loop_fn=mock_loop)
+        executor = build_leaf_executor(ctx)
+
+        graph = TaskGraph.from_root("Compare results", node_id="root")
+        graph.add_child("root", "Research A", node_id="a")
+        synth = graph.add_child(
+            "root", "Synthesise findings", node_id="s",
+            is_synthesis=True,
+            required_capabilities=["reasoning"],
+        )
+        # Mark sibling done
+        graph.transition("a", "executing")
+        graph.mark_done("a", {"findings": "data"})
+
+        assignment = _make_assignment()
+        await executor(synth, graph, assignment)
+
+        call_kwargs = mock_loop.call_args[1]
+        assert call_kwargs["is_synthesis"] is True
+
+    @pytest.mark.asyncio
+    async def test_auto_detect_synthesis_done_siblings_reasoning_caps(self):
+        """Auto-detects synthesis when done siblings exist and caps are reasoning-only."""
+        mock_loop = AsyncMock(return_value={"summary": "merged"})
+        ctx = _make_context(pack_loop_fn=mock_loop)
+        executor = build_leaf_executor(ctx)
+
+        graph = TaskGraph.from_root("Multi-step task", node_id="root")
+        graph.add_child("root", "Step 1", node_id="a")
+        compare = graph.add_child(
+            "root", "Compare", node_id="b",
+            required_capabilities=["reasoning", "summarisation"],
+        )
+        # Mark preceding sibling done
+        graph.transition("a", "executing")
+        graph.mark_done("a", {"result": "done"})
+
+        assignment = _make_assignment()
+        await executor(compare, graph, assignment)
+
+        call_kwargs = mock_loop.call_args[1]
+        assert call_kwargs["is_synthesis"] is True
+
+    @pytest.mark.asyncio
+    async def test_no_auto_detect_without_done_siblings(self):
+        """No auto-detection when siblings are not done."""
+        mock_loop = AsyncMock(return_value={})
+        ctx = _make_context(pack_loop_fn=mock_loop)
+        executor = build_leaf_executor(ctx)
+
+        graph = TaskGraph.from_root("Task", node_id="root")
+        graph.add_child("root", "Step 1", node_id="a")
+        node_b = graph.add_child(
+            "root", "Step 2", node_id="b",
+            required_capabilities=["reasoning"],
+        )
+        # Sibling 'a' is still pending — NOT done
+
+        assignment = _make_assignment()
+        await executor(node_b, graph, assignment)
+
+        call_kwargs = mock_loop.call_args[1]
+        assert call_kwargs["is_synthesis"] is False
+
+    @pytest.mark.asyncio
+    async def test_no_auto_detect_with_non_reasoning_caps(self):
+        """No auto-detection when capabilities include non-reasoning ones."""
+        mock_loop = AsyncMock(return_value={})
+        ctx = _make_context(pack_loop_fn=mock_loop)
+        executor = build_leaf_executor(ctx)
+
+        graph = TaskGraph.from_root("Task", node_id="root")
+        graph.add_child("root", "Step 1", node_id="a")
+        node_b = graph.add_child(
+            "root", "Step 2", node_id="b",
+            required_capabilities=["reasoning", "code_python"],
+        )
+        # Mark sibling done
+        graph.transition("a", "executing")
+        graph.mark_done("a", {"r": "ok"})
+
+        assignment = _make_assignment()
+        await executor(node_b, graph, assignment)
+
+        call_kwargs = mock_loop.call_args[1]
+        assert call_kwargs["is_synthesis"] is False
+
+    @pytest.mark.asyncio
+    async def test_no_auto_detect_without_caps(self):
+        """No auto-detection when node has no required_capabilities."""
+        mock_loop = AsyncMock(return_value={})
+        ctx = _make_context(pack_loop_fn=mock_loop)
+        executor = build_leaf_executor(ctx)
+
+        graph = TaskGraph.from_root("Task", node_id="root")
+        graph.add_child("root", "Step 1", node_id="a")
+        node_b = graph.add_child("root", "Step 2", node_id="b")
+        # Mark sibling done
+        graph.transition("a", "executing")
+        graph.mark_done("a", {"r": "ok"})
+
+        assignment = _make_assignment()
+        await executor(node_b, graph, assignment)
+
+        call_kwargs = mock_loop.call_args[1]
+        assert call_kwargs["is_synthesis"] is False
+
+    @pytest.mark.asyncio
+    async def test_no_auto_detect_root_node(self):
+        """Root node (no parent) never auto-detected as synthesis."""
+        mock_loop = AsyncMock(return_value={})
+        ctx = _make_context(pack_loop_fn=mock_loop)
+        executor = build_leaf_executor(ctx)
+
+        graph = TaskGraph.from_root("Simple task", node_id="root")
+        root = graph.root
+        root.required_capabilities = ["reasoning", "summarisation"]
+
+        assignment = _make_assignment()
+        await executor(root, graph, assignment)
+
+        call_kwargs = mock_loop.call_args[1]
+        assert call_kwargs["is_synthesis"] is False
+
+    @pytest.mark.asyncio
+    async def test_auto_detect_all_synthesis_cap_variants(self):
+        """Auto-detect works with all valid synthesis capability combinations."""
+        from itertools import combinations
+
+        synth_caps = ["reasoning", "summarisation", "structured_output", "instruction_following"]
+
+        # Test with each single cap
+        for cap in synth_caps:
+            mock_loop = AsyncMock(return_value={})
+            ctx = _make_context(pack_loop_fn=mock_loop)
+            executor = build_leaf_executor(ctx)
+
+            graph = TaskGraph.from_root("Task", node_id="root")
+            graph.add_child("root", "Step 1", node_id="a")
+            node_b = graph.add_child(
+                "root", "Step 2", node_id="b",
+                required_capabilities=[cap],
+            )
+            graph.transition("a", "executing")
+            graph.mark_done("a", {"r": "ok"})
+
+            assignment = _make_assignment()
+            await executor(node_b, graph, assignment)
+
+            call_kwargs = mock_loop.call_args[1]
+            assert call_kwargs["is_synthesis"] is True, f"Failed for cap={cap}"

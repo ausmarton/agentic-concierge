@@ -61,6 +61,10 @@ _MAX_REVIEW_ITERATIONS: int = 2
 # Maximum model escalations per pack loop (0 = disabled).
 _MAX_ESCALATIONS: int = 2
 
+# Maximum times a gate-rejected finish_task (same signature) can repeat
+# before we force-accept it to prevent infinite loops.
+_MAX_GATE_REJECTIONS: int = 3
+
 # Delegation depth and step limits.
 _MAX_DELEGATION_DEPTH: int = 1
 _MAX_DELEGATION_STEPS: int = 15
@@ -1265,12 +1269,17 @@ async def _execute_pack_loop(
     workspace_path: Optional[str] = None,
     config: Optional[Any] = None,
     finish_schema_key: Optional[str] = None,
+    is_synthesis: bool = False,
 ) -> Dict[str, Any]:
     """Run one specialist pack's tool loop until ``finish_task`` or ``max_steps``.
 
     ``messages`` is mutated in place as the conversation accumulates.
     ``pack.aopen()`` is called before the loop; ``pack.aclose()`` in a
     ``finally`` block — ensuring MCP subprocess cleanup even on error.
+
+    When *is_synthesis* is True, Gate 1 (must use a tool before finish_task)
+    and plain-text re-prompting are skipped because the node's job is to
+    reason over existing data, not gather new data.
 
     Returns the final payload dict (always has ``action: "final"``).
     """
@@ -1279,7 +1288,8 @@ async def _execute_pack_loop(
         tracer = _NOOP_TRACER
 
     payload: Dict[str, Any] = {}
-    any_non_finish_tool_called = False
+    # Synthesis nodes are pre-authorised to call finish_task without tools.
+    any_non_finish_tool_called = is_synthesis
     consecutive_plain_text = 0
     total_plain_text = 0
     # Repetition detection: sliding window of recent (tool_name, args) signatures.
@@ -1293,6 +1303,8 @@ async def _execute_pack_loop(
     escalated_triggers: set = set()
     # Delegation counter for step-key prefixing.
     delegation_num = 0
+    # Gate-rejection loop detection: count identical finish_task rejections.
+    gate_rejection_sigs: Dict[str, int] = {}
 
     # Build effective tool definitions: pack tools + inline tools.
     effective_tool_defs = list(pack.tool_definitions)
@@ -1391,6 +1403,20 @@ async def _execute_pack_loop(
             if not response.has_tool_calls:
                 consecutive_plain_text += 1
                 total_plain_text += 1
+                # Synthesis nodes: accept plain text immediately — their job
+                # is reasoning/comparison, not tool calling.
+                if is_synthesis:
+                    logger.info(
+                        "Step %s: synthesis node returned plain text; accepting as final payload",
+                        step_key,
+                    )
+                    payload = {
+                        "action": "final",
+                        "summary": response.content or "",
+                        "artifacts": [],
+                        "next_steps": [],
+                    }
+                    break
                 if consecutive_plain_text <= _MAX_PLAIN_TEXT_RETRIES:
                     tool_names = [t["function"]["name"] for t in effective_tool_defs]
                     if any_non_finish_tool_called or total_plain_text >= 2:
@@ -1492,30 +1518,44 @@ async def _execute_pack_loop(
                 if tc.tool_name == pack.finish_tool_name:
                     # Gate 1: LLM must attempt at least one non-finish tool first.
                     if not any_non_finish_tool_called:
-                        logger.warning(
-                            "Step %s: finish_task called before any tool was used; "
-                            "sending error to LLM for retry",
-                            step_key,
-                        )
-                        error_result = {
-                            "error": "finish_task_called_without_doing_work",
-                            "message": (
-                                "You must use at least one tool to actually complete "
-                                "the task before calling finish_task. Call finish_task "
-                                "only after you have done the work and verified it."
-                            ),
-                            "hint": (
-                                "Use your available tools first (e.g. shell, write_file, "
-                                "web_search), then call finish_task."
-                            ),
-                        }
-                        messages.append(
-                            _make_tool_result(tc.call_id, json.dumps(error_result))
-                        )
-                        _no_work_ev = {"tool": tc.tool_name, "result": error_result}
-                        run_repository.append_event(run_id, "tool_result", _no_work_ev, step=step_key)
-                        _emit(event_queue, "tool_result", _no_work_ev, step=step_key)
-                        continue
+                        # Track gate-rejected finish_task signatures to detect
+                        # infinite rejection loops (the LLM has no other option).
+                        _gate_sig = json.dumps(tc.arguments, sort_keys=True)
+                        gate_rejection_sigs[_gate_sig] = gate_rejection_sigs.get(_gate_sig, 0) + 1
+                        if gate_rejection_sigs[_gate_sig] >= _MAX_GATE_REJECTIONS:
+                            logger.warning(
+                                "Step %s: finish_task rejected %d times with same args; "
+                                "force-accepting to break loop",
+                                step_key, gate_rejection_sigs[_gate_sig],
+                            )
+                            # Fall through to Gate 2 (field validation) instead
+                            # of rejecting again.
+                            any_non_finish_tool_called = True
+                        else:
+                            logger.warning(
+                                "Step %s: finish_task called before any tool was used; "
+                                "sending error to LLM for retry",
+                                step_key,
+                            )
+                            error_result = {
+                                "error": "finish_task_called_without_doing_work",
+                                "message": (
+                                    "You must use at least one tool to actually complete "
+                                    "the task before calling finish_task. Call finish_task "
+                                    "only after you have done the work and verified it."
+                                ),
+                                "hint": (
+                                    "Use your available tools first (e.g. shell, write_file, "
+                                    "web_search), then call finish_task."
+                                ),
+                            }
+                            messages.append(
+                                _make_tool_result(tc.call_id, json.dumps(error_result))
+                            )
+                            _no_work_ev = {"tool": tc.tool_name, "result": error_result}
+                            run_repository.append_event(run_id, "tool_result", _no_work_ev, step=step_key)
+                            _emit(event_queue, "tool_result", _no_work_ev, step=step_key)
+                            continue
 
                     # Gate 2: Required fields must all be present.
                     missing = [

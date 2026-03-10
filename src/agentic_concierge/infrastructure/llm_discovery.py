@@ -195,16 +195,26 @@ def select_model(
         preferred_family = _model_family(preferred_model)
 
         def _size_candidates(model_names: list[str]) -> list[str]:
-            """Sort by log-scale distance from preferred size; break ties by preferring smaller.
+            """Sort by log-scale distance from preferred size; prefer upgrading.
 
             Log-scale (ratio) correctly handles the asymmetry: 0.5b is 28x
             away from 14b while 32b is only 2.3x away.  Absolute distance
             would incorrectly prefer the tiny (useless) model.
+
+            A downgrade penalty of 0.4 biases toward larger models when the
+            preferred size is unavailable.  This means a 2x upgrade (e.g.
+            14b→32b, log-dist 0.69) is preferred over a 2x downgrade (e.g.
+            14b→7b, log-dist 0.69 + 0.4 = 1.09).
             """
+            _DOWNGRADE_PENALTY = 0.4
+
             def _log_dist(size: float) -> float:
                 if size <= 0 or preferred_size <= 0:
                     return 999.0
-                return abs(math.log(size / preferred_size))
+                dist = abs(math.log(size / preferred_size))
+                if size < preferred_size:
+                    dist += _DOWNGRADE_PENALTY
+                return dist
 
             sized = [(n, _param_size_sort_key(n, details_by_name.get(n))[0]) for n in model_names]
             return [n for n, _ in sorted(sized, key=lambda t: (_log_dist(t[1]), t[1]))]

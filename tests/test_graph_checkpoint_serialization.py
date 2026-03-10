@@ -72,6 +72,7 @@ class TestNodeSerialization:
         assert restored.required_capabilities == []
         assert restored.required_tools == []
         assert restored.finish_schema_key == "general"
+        assert restored.is_synthesis is False
         assert restored.result is None
         assert restored.critique is None
         assert restored.depth == 0
@@ -86,6 +87,7 @@ class TestNodeSerialization:
             required_capabilities=["code_python", "reasoning"],
             required_tools=["shell", "run_tests"],
             finish_schema_key="code",
+            is_synthesis=True,
             result={"summary": "done", "files_modified": ["a.py"]},
             critique="Looks good",
             depth=3,
@@ -100,9 +102,32 @@ class TestNodeSerialization:
         assert restored.required_capabilities == ["code_python", "reasoning"]
         assert restored.required_tools == ["shell", "run_tests"]
         assert restored.finish_schema_key == "code"
+        assert restored.is_synthesis is True
         assert restored.result == {"summary": "done", "files_modified": ["a.py"]}
         assert restored.critique == "Looks good"
         assert restored.depth == 3
+
+    def test_round_trip_synthesis_false(self):
+        """is_synthesis=False is preserved through serialization."""
+        node = TaskNode(id="n", description="work node", is_synthesis=False)
+        data = serialize_node(node)
+        assert data["is_synthesis"] is False
+        restored = deserialize_node(data)
+        assert restored.is_synthesis is False
+
+    def test_round_trip_synthesis_true(self):
+        """is_synthesis=True is preserved through serialization."""
+        node = TaskNode(id="n", description="compare results", is_synthesis=True)
+        data = serialize_node(node)
+        assert data["is_synthesis"] is True
+        restored = deserialize_node(data)
+        assert restored.is_synthesis is True
+
+    def test_deserialize_missing_is_synthesis_defaults_false(self):
+        """Legacy data without is_synthesis field defaults to False."""
+        data = {"id": "n", "description": "old node", "status": "pending"}
+        node = deserialize_node(data)
+        assert node.is_synthesis is False
 
     def test_serialized_is_json_compatible(self):
         node = TaskNode(id="n1", description="task", result={"key": [1, 2, 3]})
