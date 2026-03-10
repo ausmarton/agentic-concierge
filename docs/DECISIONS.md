@@ -1301,3 +1301,41 @@ Checkpoint failures are fail-open (logged, not raised) — they never crash the 
 - The checkpoint file (`graph_checkpoint.json`) is atomically written to prevent corruption.
 - 82 new tests across 4 test files cover serialization, I/O, resume logic, and CLI/HTTP wiring.
 - Backward compatible: existing runs without checkpoints work unchanged.
+
+---
+
+## ADR-033: Maximal-default install and concurrent backend utilisation
+
+**Status:** Accepted
+**Date:** 2026-03-10
+
+**Context:**
+Real-world usage revealed three friction points:
+1. Default install (`CONCIERGE_EXTRA` unset) gives a bare-bones package — no MCP, no browser, no
+   embeddings. Users must discover and set `CONCIERGE_EXTRA=all` manually.
+2. Independent task graph nodes execute in parallel (`asyncio.gather`), but Ollama serialises
+   model inference on a single GPU — negating the parallelism benefit.
+3. vLLM supports continuous batching (true concurrent requests) but requires manual startup.
+   There is no auto-start equivalent to `ensure_ollama()`.
+
+**Principles:**
+- The default install should detect hardware and install everything it can use. Trimming down
+  is the customisation, not the default.
+- If resources are available, use them — parallel inference backends should be preferred over
+  serial ones when the task graph has concurrent nodes.
+
+**Decision:**
+1. **Maximal-default extras** (implemented): Launcher defaults `pypi_extra` to `"all"` when
+   `CONCIERGE_EXTRA` is unset. Users opt out with `CONCIERGE_EXTRA=""` for bare-bones.
+2. **vLLM auto-start** (backlog): Add `ensure_vllm()` to `BackendManager`, mirroring
+   `ensure_ollama()`. On SERVER profiles with GPU, auto-start vLLM with the best available
+   model. Backend priority already prefers vLLM on LARGE/SERVER tiers.
+3. **Backend preference for parallelism** (backlog): When the task graph has >1 concurrent
+   nodes, prefer backends that support concurrent requests (vLLM) over serial ones (Ollama).
+   This is a model assignment hint, not a hard requirement.
+
+**Consequences:**
+- First-time `concierge` launch installs all extras by default (browser, embed, mcp, otel).
+  Slightly longer first install, but the system is immediately capable.
+- Existing users with `CONCIERGE_EXTRA` set are unaffected.
+- vLLM auto-start and parallel backend preference are future work items in the backlog.

@@ -1217,3 +1217,76 @@ Testable without the real wheel: mock `mistralrs` in `sys.modules`.
 
 **Deliverable:** Update `docs/ARCHITECTURE.md` to reflect: bootstrap layer, three-layer inference stack, feature flag gating, platformdirs paths, new `BackendManager` in lifespan, new CLI commands. Do this when implementation begins, not before (keep docs honest).
 
+---
+
+## Tier 1 — Operational Excellence (ADR-033)
+
+These items directly improve end-user experience and system performance. They build on the V2
+multi-backend architecture to fully utilise available hardware.
+
+---
+
+### OPS-1: vLLM auto-start on SERVER/LARGE profiles
+
+**Why:** vLLM supports continuous batching — true concurrent model inference. The task graph
+already runs independent nodes in parallel via `asyncio.gather()`, but Ollama serialises
+inference on a single GPU. On SERVER/LARGE profiles with GPU, vLLM should be auto-started
+just like Ollama is today.
+
+**What to change:**
+- `bootstrap/backend_manager.py` — add `ensure_vllm()` mirroring `ensure_ollama()`.
+  Auto-start vLLM with the best available model when feature is enabled and GPU detected.
+- `config/schema.py` — add `vllm_start_cmd`, `vllm_model`, `vllm_gpu_memory_utilization`
+  config fields with sensible defaults.
+- `config/defaults/backends.yaml` — add vLLM start command template.
+- Backend priority already prefers vLLM on LARGE/SERVER tiers (`_FALLBACK_BACKEND_PRIORITY`).
+
+**Acceptance criteria:**
+- On a SERVER profile with GPU, `concierge run` auto-starts vLLM if not already running.
+- `concierge doctor` shows vLLM as healthy after auto-start.
+- Existing Ollama-only setups are unaffected (vLLM requires GPU).
+- New tests in `tests/test_backend_manager.py`.
+
+**ADR:** ADR-033
+
+---
+
+### OPS-2: Parallel backend preference for concurrent task graph nodes
+
+**Why:** When the planner decomposes a task into 3+ independent sub-tasks, they can execute
+in parallel. But if all use Ollama (serial inference), the parallelism is wasted. The model
+assignment layer should prefer backends that support concurrent requests when the graph has
+concurrent nodes.
+
+**What to change:**
+- `application/affinity_executor.py` — when assigning models, check if >1 nodes will run
+  concurrently. If so, prefer vLLM handles over Ollama handles for the concurrent batch.
+- `infrastructure/backends/model_runtime.py` — add `supports_concurrent_requests: bool`
+  property to `InferenceBackend` protocol.
+
+**Acceptance criteria:**
+- With both Ollama and vLLM available, concurrent graph nodes prefer vLLM.
+- Sequential nodes (single ready node at a time) can still use Ollama.
+- Fallback: if vLLM unavailable, Ollama handles all nodes (as today).
+- Tests in `tests/test_affinity_executor.py`.
+
+**ADR:** ADR-033
+
+---
+
+### OPS-3: Ollama connection pooling for concurrent requests
+
+**Why:** Even without vLLM, Ollama (v0.14+) can handle concurrent requests. The current
+client creates a fresh `httpx.AsyncClient` per call with no connection pooling. Adding a
+shared client with connection pooling would improve performance for concurrent graph nodes.
+
+**What to change:**
+- `infrastructure/ollama/client.py` — use a shared `httpx.AsyncClient` instance with
+  connection pooling instead of creating one per call.
+- `infrastructure/backends/ollama.py` — same pattern for backend health checks.
+
+**Acceptance criteria:**
+- Concurrent graph nodes reuse HTTP connections to Ollama.
+- No change in single-node behaviour.
+- Tests verify shared client lifecycle.
+

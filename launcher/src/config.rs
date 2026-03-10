@@ -48,7 +48,13 @@ pub fn launcher_config() -> Result<LauncherConfig, ConfigError> {
         .map(|v| v == "1")
         .unwrap_or(false);
 
-    let pypi_extra = std::env::var("CONCIERGE_EXTRA").ok();
+    // Default to "all" extras — install everything the hardware can support.
+    // Users can override with CONCIERGE_EXTRA="" for bare-bones or a specific subset.
+    let pypi_extra = match std::env::var("CONCIERGE_EXTRA") {
+        Ok(v) if v.is_empty() => None,          // explicit "" = no extras
+        Ok(v) => Some(v),                        // user-specified extras
+        Err(_) => Some("all".to_string()),       // default = all
+    };
 
     Ok(LauncherConfig {
         data_dir,
@@ -120,5 +126,37 @@ mod tests {
         let config = launcher_config().unwrap();
         std::env::remove_var("CONCIERGE_DATA_DIR");
         assert_eq!(config.data_dir, PathBuf::from("/tmp/test-override-12345"));
+    }
+
+    #[test]
+    fn pypi_extra_defaults_to_all() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CONCIERGE_EXTRA");
+        std::env::set_var("CONCIERGE_DATA_DIR", "/tmp/test-concierge-extra-default");
+        let config = launcher_config().unwrap();
+        std::env::remove_var("CONCIERGE_DATA_DIR");
+        assert_eq!(config.pypi_extra, Some("all".to_string()));
+    }
+
+    #[test]
+    fn pypi_extra_empty_means_none() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("CONCIERGE_EXTRA", "");
+        std::env::set_var("CONCIERGE_DATA_DIR", "/tmp/test-concierge-extra-empty");
+        let config = launcher_config().unwrap();
+        std::env::remove_var("CONCIERGE_EXTRA");
+        std::env::remove_var("CONCIERGE_DATA_DIR");
+        assert_eq!(config.pypi_extra, None);
+    }
+
+    #[test]
+    fn pypi_extra_custom_value() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("CONCIERGE_EXTRA", "mcp,otel");
+        std::env::set_var("CONCIERGE_DATA_DIR", "/tmp/test-concierge-extra-custom");
+        let config = launcher_config().unwrap();
+        std::env::remove_var("CONCIERGE_EXTRA");
+        std::env::remove_var("CONCIERGE_DATA_DIR");
+        assert_eq!(config.pypi_extra, Some("mcp,otel".to_string()));
     }
 }
