@@ -233,7 +233,7 @@ def test_config_features_default_all_none():
     """All feature overrides default to None (use profile default)."""
     from agentic_concierge.config.schema import FeaturesConfig
     fc = FeaturesConfig()
-    for field_name in ["inprocess", "ollama", "vllm", "cloud", "mcp",
+    for field_name in ["ollama", "llama_cpp", "vllm", "cloud", "mcp",
                         "browser", "embedding", "telemetry", "container"]:
         assert getattr(fc, field_name) is None
 
@@ -254,7 +254,7 @@ def test_config_features_override_round_trip():
     d = fc.model_dump()
     assert d["ollama"] is True
     assert d["vllm"] is False
-    assert d["inprocess"] is None
+    assert d["llama_cpp"] is None
 
 
 def test_config_profile_field_from_file(monkeypatch):

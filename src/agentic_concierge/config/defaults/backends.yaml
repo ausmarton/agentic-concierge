@@ -21,14 +21,15 @@ backends:
     model_dir: ""              # directory containing .gguf files; empty = disabled
     n_gpu_layers: -1           # -1 = all layers on GPU; 0 = CPU only
     ctx_size: 8192
+    parallel: 4                # concurrent request slots per llama-server process
 
 # Per-tier backend priority (replaces BACKEND_PRIORITY in features.py).
 # resolve_llm() tries backends in this order when the configured primary fails.
 # llama_cpp uses Vulkan/Metal/CUDA and works on all platforms including AMD gfx1151.
 # vLLM requires CUDA/ROCm and is best for high-throughput concurrent requests.
 tier_priority:
-  nano: ["inprocess", "ollama", "cloud"]
-  small: ["ollama", "inprocess", "cloud"]
-  medium: ["ollama", "llama_cpp", "inprocess", "cloud"]
-  large: ["ollama", "llama_cpp", "vllm", "inprocess", "cloud"]
-  server: ["ollama", "llama_cpp", "vllm", "inprocess", "cloud"]
+  nano: ["ollama", "llama_cpp", "cloud"]
+  small: ["ollama", "llama_cpp", "cloud"]
+  medium: ["ollama", "llama_cpp", "cloud"]
+  large: ["ollama", "llama_cpp", "vllm", "cloud"]
+  server: ["vllm", "ollama", "llama_cpp", "cloud"]

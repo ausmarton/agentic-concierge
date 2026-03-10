@@ -33,10 +33,5 @@ tier_models:
     fast: "qwen2.5:32b"
     quality: "qwen2.5:72b"
 
-# Nano model for bootstrap/in-process inference (replaces NANO_GGUF_* in constants.py).
-nano:
-  gguf_filename: "qwen2.5-3b-instruct-q4_k_m.gguf"
-  gguf_url: "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf"
-
 # Approximate RAM each model needs for its KV-cache context window (MB).
 model_ctx_mb: 2048

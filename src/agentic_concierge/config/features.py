@@ -28,14 +28,12 @@ class ProfileTier(str, Enum):
 class Feature(str, Enum):
     """Individual capability that can be enabled or disabled per profile.
 
-    Disabled features are **gated at four levels**:
-    1. Install-time: extras (e.g. ``[nano]``, ``[browser]``) guard optional deps.
-    2. Import-time: lazy imports inside each feature's module.
-    3. Config-time: ``FeatureSet.require()`` before instantiating any resource.
-    4. Process-time: no subprocess/model spawning for disabled features.
+    Disabled features are **gated at three levels**:
+    1. Install-time: extras (e.g. ``[browser]``) guard optional deps.
+    2. Config-time: ``FeatureSet.require()`` before instantiating any resource.
+    3. Process-time: no subprocess/model spawning for disabled features.
     """
 
-    INPROCESS = "inprocess"   # in-process inference via mistral.rs
     OLLAMA = "ollama"         # Ollama local LLM server
     LLAMA_CPP = "llama_cpp"   # managed llama-server processes (Vulkan/Metal/CUDA)
     VLLM = "vllm"             # vLLM high-throughput server (CUDA/ROCm)
@@ -48,23 +46,22 @@ class Feature(str, Enum):
 
 
 # Default features enabled per profile tier.
-# llama_cpp is the preferred managed backend (Vulkan/Metal/CUDA — works everywhere).
+# Ollama is the primary backend for all tiers (model registry, UX).
+# llama_cpp is the concurrent inference backend (Vulkan/Metal/CUDA — works everywhere).
 # vLLM is enabled on LARGE/SERVER where CUDA/ROCm is available for high-throughput.
-# Ollama is always available as the simplest backend.
 PROFILE_FEATURES: dict[ProfileTier, frozenset[Feature]] = {
     ProfileTier.NANO: frozenset({
-        Feature.INPROCESS,
+        Feature.OLLAMA,
         Feature.CLOUD,
     }),
     ProfileTier.SMALL: frozenset({
-        Feature.INPROCESS,
         Feature.OLLAMA,
+        Feature.LLAMA_CPP,
         Feature.CLOUD,
         Feature.MCP,
         Feature.BROWSER,
     }),
     ProfileTier.MEDIUM: frozenset({
-        Feature.INPROCESS,
         Feature.OLLAMA,
         Feature.LLAMA_CPP,
         Feature.CLOUD,
@@ -73,7 +70,6 @@ PROFILE_FEATURES: dict[ProfileTier, frozenset[Feature]] = {
         Feature.BROWSER,
     }),
     ProfileTier.LARGE: frozenset({
-        Feature.INPROCESS,
         Feature.OLLAMA,
         Feature.LLAMA_CPP,
         Feature.VLLM,
@@ -84,7 +80,6 @@ PROFILE_FEATURES: dict[ProfileTier, frozenset[Feature]] = {
         Feature.BROWSER,
     }),
     ProfileTier.SERVER: frozenset({
-        Feature.INPROCESS,
         Feature.OLLAMA,
         Feature.LLAMA_CPP,
         Feature.VLLM,
@@ -102,11 +97,11 @@ PROFILE_FEATURES: dict[ProfileTier, frozenset[Feature]] = {
 # Loaded lazily from config/defaults/backends.yaml with user override support.
 
 _FALLBACK_BACKEND_PRIORITY: dict[ProfileTier, list[str]] = {
-    ProfileTier.NANO: ["inprocess", "ollama", "cloud"],
-    ProfileTier.SMALL: ["ollama", "inprocess", "cloud"],
-    ProfileTier.MEDIUM: ["ollama", "llama_cpp", "inprocess", "cloud"],
-    ProfileTier.LARGE: ["ollama", "llama_cpp", "vllm", "inprocess", "cloud"],
-    ProfileTier.SERVER: ["ollama", "llama_cpp", "vllm", "inprocess", "cloud"],
+    ProfileTier.NANO: ["ollama", "llama_cpp", "cloud"],
+    ProfileTier.SMALL: ["ollama", "llama_cpp", "cloud"],
+    ProfileTier.MEDIUM: ["ollama", "llama_cpp", "cloud"],
+    ProfileTier.LARGE: ["ollama", "llama_cpp", "vllm", "cloud"],
+    ProfileTier.SERVER: ["vllm", "ollama", "llama_cpp", "cloud"],
 }
 
 _cached_backend_priority: dict[ProfileTier, list[str]] | None = None

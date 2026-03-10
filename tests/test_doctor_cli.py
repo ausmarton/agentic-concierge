@@ -47,10 +47,11 @@ def _sample_profile() -> SystemProfile:
 
 def _healthy_backends() -> dict:
     return {
-        "inprocess": BackendHealth(name="inprocess", status=BackendStatus.HEALTHY),
         "ollama": BackendHealth(
             name="ollama", status=BackendStatus.HEALTHY, models=["qwen2.5:7b"]
         ),
+        "llama_cpp": BackendHealth(name="llama_cpp", status=BackendStatus.HEALTHY,
+                                    hint="llama-server installed; models started on demand."),
         "vllm": BackendHealth(name="vllm", status=BackendStatus.DISABLED),
     }
 
@@ -96,10 +97,10 @@ def test_doctor_shows_backends(monkeypatch):
 
 def test_doctor_unhealthy_backend_shows_hint(monkeypatch):
     backends = {
-        "inprocess": BackendHealth(name="inprocess", status=BackendStatus.NOT_AVAILABLE,
-                                   hint="pip install agentic-concierge[nano]"),
         "ollama": BackendHealth(name="ollama", status=BackendStatus.NOT_INSTALLED,
                                 hint="Install from ollama.com"),
+        "llama_cpp": BackendHealth(name="llama_cpp", status=BackendStatus.NOT_INSTALLED,
+                                    hint="Install llama.cpp"),
         "vllm": BackendHealth(name="vllm", status=BackendStatus.DISABLED),
     }
     with (

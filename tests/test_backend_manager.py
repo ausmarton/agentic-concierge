@@ -17,30 +17,12 @@ from agentic_concierge.config.features import Feature, FeatureSet
 
 
 def _fs(*features: Feature) -> FeatureSet:
+    """Build a FeatureSet with the given features enabled."""
     return FeatureSet(enabled=frozenset(features))
 
 
 def _all_fs() -> FeatureSet:
     return FeatureSet.all_enabled()
-
-
-# ---------------------------------------------------------------------------
-# probe_inprocess
-# ---------------------------------------------------------------------------
-
-def test_probe_inprocess_available():
-    mgr = BackendManager()
-    with patch("importlib.util.find_spec", return_value=MagicMock()):
-        health = mgr.probe_inprocess()
-    assert health.status == BackendStatus.HEALTHY
-
-
-def test_probe_inprocess_not_available():
-    mgr = BackendManager()
-    with patch("importlib.util.find_spec", return_value=None):
-        health = mgr.probe_inprocess()
-    assert health.status == BackendStatus.NOT_AVAILABLE
-    assert "nano" in health.hint.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -153,27 +135,46 @@ def test_probe_llama_cpp_not_installed():
 @pytest.mark.asyncio
 async def test_probe_all_disabled_backend_not_probed():
     """Disabled backends are marked DISABLED without any I/O."""
-    # Only INPROCESS enabled; Ollama, llama_cpp, vLLM disabled
-    fs = _fs(Feature.INPROCESS)
+    # Only OLLAMA enabled; llama_cpp, vLLM disabled
+    fs = _fs(Feature.OLLAMA)
     mgr = BackendManager()
-    with patch("importlib.util.find_spec", return_value=MagicMock()):
+    tags_resp = MagicMock()
+    tags_resp.status_code = 200
+    tags_resp.json.return_value = {"models": [{"name": "qwen2.5:7b"}]}
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.get = AsyncMock(return_value=tags_resp)
+    with (
+        patch("shutil.which", return_value="/usr/bin/ollama"),
+        patch("httpx.AsyncClient", return_value=mock_client),
+    ):
         result = await mgr.probe_all(fs)
 
-    assert result["inprocess"].status == BackendStatus.HEALTHY
-    assert result["ollama"].status == BackendStatus.DISABLED
+    assert result["ollama"].status == BackendStatus.HEALTHY
     assert result["llama_cpp"].status == BackendStatus.DISABLED
     assert result["vllm"].status == BackendStatus.DISABLED
 
 
 @pytest.mark.asyncio
 async def test_probe_all_get_healthy_backends():
-    fs = _fs(Feature.INPROCESS)
+    fs = _fs(Feature.OLLAMA)
     mgr = BackendManager()
-    with patch("importlib.util.find_spec", return_value=MagicMock()):
+    tags_resp = MagicMock()
+    tags_resp.status_code = 200
+    tags_resp.json.return_value = {"models": [{"name": "qwen2.5:7b"}]}
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.get = AsyncMock(return_value=tags_resp)
+    with (
+        patch("shutil.which", return_value="/usr/bin/ollama"),
+        patch("httpx.AsyncClient", return_value=mock_client),
+    ):
         await mgr.probe_all(fs)
     healthy = mgr.get_healthy_backends()
-    assert "inprocess" in healthy
-    assert "ollama" not in healthy
+    assert "ollama" in healthy
+    assert "llama_cpp" not in healthy
 
 
 @pytest.mark.asyncio

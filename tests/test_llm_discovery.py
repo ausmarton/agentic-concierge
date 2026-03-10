@@ -8,7 +8,6 @@ import pytest
 
 from agentic_concierge.infrastructure.llm_discovery import (
     _is_ollama_chat_capable,
-    _nano_model_path,
     _ollama_model_name,
     _try_backend,
     discover_ollama_models,
@@ -155,25 +154,6 @@ def test_resolve_llm_fallback_vllm_to_ollama():
     assert len(resolved.warnings) >= 1
 
 
-def test_resolve_llm_fallback_to_inprocess():
-    """All remote backends down, GGUF exists -> resolves inprocess."""
-    cfg = _make_config(
-        local_llm_ensure_available=False,
-        profile="nano",
-    )
-    with patch("agentic_concierge.infrastructure.llm_discovery.discover_ollama_models", return_value=None), \
-         patch("agentic_concierge.infrastructure.llm_discovery.discover_openai_models", return_value=None), \
-         patch("agentic_concierge.infrastructure.llm_discovery._nano_model_path", return_value="/fake/model.gguf"), \
-         patch("agentic_concierge.infrastructure.chat.inprocess.is_available", return_value=True), \
-         patch("agentic_concierge.infrastructure.llm_discovery.shutil") as mock_shutil:
-        mock_shutil.which.return_value = None  # no ollama binary
-        resolved = resolve_llm(cfg, "quality")
-
-    assert resolved.fallback_used is True
-    assert resolved.resolved_backend == "inprocess"
-    assert resolved.model == "/fake/model.gguf"
-
-
 def test_resolve_llm_configured_backend_tried_first():
     """Configured Ollama tried first before fallback chain kicks in."""
     models = [
@@ -198,8 +178,6 @@ def test_resolve_llm_respects_disabled_feature():
     )
     with patch("agentic_concierge.infrastructure.llm_discovery.discover_ollama_models", return_value=None), \
          patch("agentic_concierge.infrastructure.llm_discovery.discover_openai_models", return_value=None), \
-         patch("agentic_concierge.infrastructure.llm_discovery._nano_model_path", return_value=None), \
-         patch("agentic_concierge.infrastructure.chat.inprocess.is_available", return_value=False), \
          patch("agentic_concierge.infrastructure.llm_discovery.shutil") as mock_shutil:
         mock_shutil.which.return_value = None
 
@@ -294,8 +272,6 @@ def test_resolve_llm_comprehensive_error_all_fail():
     )
     with patch("agentic_concierge.infrastructure.llm_discovery.discover_ollama_models", return_value=None), \
          patch("agentic_concierge.infrastructure.llm_discovery.discover_openai_models", return_value=None), \
-         patch("agentic_concierge.infrastructure.llm_discovery._nano_model_path", return_value=None), \
-         patch("agentic_concierge.infrastructure.chat.inprocess.is_available", return_value=False), \
          patch("agentic_concierge.infrastructure.llm_discovery.shutil") as mock_shutil:
         mock_shutil.which.return_value = None
 
@@ -390,8 +366,6 @@ def test_resolve_llm_fallback_to_cloud():
     )
     with patch("agentic_concierge.infrastructure.llm_discovery.discover_ollama_models", return_value=None), \
          patch("agentic_concierge.infrastructure.llm_discovery.discover_openai_models", return_value=None), \
-         patch("agentic_concierge.infrastructure.llm_discovery._nano_model_path", return_value=None), \
-         patch("agentic_concierge.infrastructure.chat.inprocess.is_available", return_value=False), \
          patch("agentic_concierge.infrastructure.llm_discovery.shutil") as mock_shutil:
         mock_shutil.which.return_value = None
         resolved = resolve_llm(cfg, "quality")

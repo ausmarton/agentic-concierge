@@ -49,7 +49,6 @@ dev = [
 ]
 otel = ["opentelemetry-api>=1.24", "opentelemetry-sdk>=1.24"]
 mcp = ["mcp>=1.0"]
-nano = ["mistralrs>=0.3"]
 embed = ["chromadb>=0.4"]
 browser = ["playwright>=1.40"]
 all = ["agentic-concierge[mcp,otel,embed,browser]"]

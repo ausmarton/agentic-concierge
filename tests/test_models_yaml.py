@@ -1,9 +1,8 @@
-"""Tests for externalized models.yaml — tier model recommendations and nano config.
+"""Tests for externalized models.yaml — tier model recommendations.
 
 Verifies:
 - Shipped default YAML loads correctly and matches v1 hardcoded values.
 - User YAML override changes tier model recommendations.
-- Nano config is overridable.
 - Cache invalidation via reload functions.
 - Backward compatibility: existing model_advisor behaviour unchanged.
 """
@@ -26,13 +25,6 @@ from agentic_concierge.bootstrap.model_advisor import (
     reload_models_config,
 )
 from agentic_concierge.bootstrap.system_probe import SystemProbe
-from agentic_concierge.config.constants import (
-    _FALLBACK_NANO_GGUF_FILENAME,
-    _FALLBACK_NANO_GGUF_URL,
-    nano_gguf_filename,
-    nano_gguf_url,
-    reload_nano_config,
-)
 from agentic_concierge.config.features import ProfileTier
 
 
@@ -56,11 +48,9 @@ class TestShippedDefaults:
 
     def setup_method(self):
         reload_models_config()
-        reload_nano_config()
 
     def teardown_method(self):
         reload_models_config()
-        reload_nano_config()
 
     def test_yaml_file_exists(self):
         from agentic_concierge.config.external import shipped_defaults_dir
@@ -81,12 +71,6 @@ class TestShippedDefaults:
             assert table[tier] == _FALLBACK_MODEL_TABLE[tier], (
                 f"Tier {tier.name} mismatch: YAML={table[tier]}, fallback={_FALLBACK_MODEL_TABLE[tier]}"
             )
-
-    def test_nano_gguf_filename_matches_v1(self):
-        assert nano_gguf_filename() == _FALLBACK_NANO_GGUF_FILENAME
-
-    def test_nano_gguf_url_matches_v1(self):
-        assert nano_gguf_url() == _FALLBACK_NANO_GGUF_URL
 
     def test_model_ctx_mb_matches_v1(self):
         assert _loaded_model_ctx_mb() == _FALLBACK_MODEL_CTX_MB
@@ -113,17 +97,15 @@ class TestShippedDefaults:
 
 
 class TestUserOverride:
-    """Verify user YAML can override tier models and nano config."""
+    """Verify user YAML can override tier models."""
 
     def setup_method(self):
         reload_models_config()
-        reload_nano_config()
 
     def teardown_method(self):
         # Clean up env vars
         os.environ.pop("CONCIERGE_MODELS_PATH", None)
         reload_models_config()
-        reload_nano_config()
 
     def test_user_override_changes_tier_quality_model(self, tmp_path):
         """User YAML overriding medium tier quality model propagates to advise_profile."""
@@ -146,21 +128,6 @@ class TestUserOverride:
         # Other tiers remain at default
         nano_profile = advise_profile(_probe(4 * 1024))
         assert nano_profile.fast_model == "qwen2.5:3b"
-
-    def test_user_override_changes_nano_filename(self, tmp_path):
-        override = {
-            "nano": {
-                "gguf_filename": "qwen3.5-3b-q4_k_m.gguf",
-                "gguf_url": "https://example.com/qwen3.5-3b-q4_k_m.gguf",
-            }
-        }
-        override_file = tmp_path / "models.yaml"
-        override_file.write_text(yaml.dump(override))
-        os.environ["CONCIERGE_MODELS_PATH"] = str(override_file)
-        reload_nano_config()
-
-        assert nano_gguf_filename() == "qwen3.5-3b-q4_k_m.gguf"
-        assert nano_gguf_url() == "https://example.com/qwen3.5-3b-q4_k_m.gguf"
 
     def test_user_override_partial_tier_preserves_other_tiers(self, tmp_path):
         """Only the overridden tier changes; others stay at defaults."""
@@ -204,12 +171,10 @@ class TestCacheInvalidation:
 
     def setup_method(self):
         reload_models_config()
-        reload_nano_config()
 
     def teardown_method(self):
         os.environ.pop("CONCIERGE_MODELS_PATH", None)
         reload_models_config()
-        reload_nano_config()
 
     def test_reload_models_config_clears_cache(self, tmp_path):
         # Load defaults
@@ -229,20 +194,6 @@ class TestCacheInvalidation:
 
         table2 = _loaded_model_table()
         assert table2[ProfileTier.NANO]["quality"] == "qwen3.5:3b"
-
-    def test_reload_nano_config_clears_cache(self, tmp_path):
-        # Load defaults
-        fn1 = nano_gguf_filename()
-        assert fn1 == _FALLBACK_NANO_GGUF_FILENAME
-
-        # Apply override
-        override = {"nano": {"gguf_filename": "new-model.gguf"}}
-        override_file = tmp_path / "models.yaml"
-        override_file.write_text(yaml.dump(override))
-        os.environ["CONCIERGE_MODELS_PATH"] = str(override_file)
-        reload_nano_config()
-
-        assert nano_gguf_filename() == "new-model.gguf"
 
 
 # ---------------------------------------------------------------------------
@@ -300,24 +251,20 @@ class TestErrorResilience:
 
     def setup_method(self):
         reload_models_config()
-        reload_nano_config()
 
     def teardown_method(self):
         os.environ.pop("CONCIERGE_MODELS_PATH", None)
         reload_models_config()
-        reload_nano_config()
 
     def test_malformed_yaml_falls_back(self, tmp_path):
         bad_file = tmp_path / "models.yaml"
         bad_file.write_text("not: [valid: yaml: structure")
         os.environ["CONCIERGE_MODELS_PATH"] = str(bad_file)
         reload_models_config()
-        reload_nano_config()
 
         # Should get fallback values, not crash
         table = _loaded_model_table()
         assert table[ProfileTier.NANO] == _FALLBACK_MODEL_TABLE[ProfileTier.NANO]
-        assert nano_gguf_filename() == _FALLBACK_NANO_GGUF_FILENAME
 
     def test_empty_yaml_falls_back(self, tmp_path):
         empty_file = tmp_path / "models.yaml"

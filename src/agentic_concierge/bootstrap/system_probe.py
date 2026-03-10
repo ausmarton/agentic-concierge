@@ -7,7 +7,6 @@ a valid ``SystemProbe`` regardless of the host environment.
 
 from __future__ import annotations
 
-import importlib.util
 import logging
 import os
 import platform
@@ -41,7 +40,7 @@ class SystemProbe:
     ollama_installed: bool = False
     ollama_reachable: bool = False
     vllm_reachable: bool = False
-    mistralrs_available: bool = False
+    llama_server_installed: bool = False
 
     @property
     def total_vram_mb(self) -> int:
@@ -100,7 +99,7 @@ async def probe_system(vllm_base_url: str = "http://localhost:8000") -> SystemPr
     )
 
     ollama_installed = shutil.which("ollama") is not None
-    mistralrs_available = importlib.util.find_spec("mistralrs") is not None
+    llama_server_installed = shutil.which("llama-server") is not None
 
     return SystemProbe(
         cpu_cores=cpu_cores,
@@ -113,7 +112,7 @@ async def probe_system(vllm_base_url: str = "http://localhost:8000") -> SystemPr
         ollama_installed=ollama_installed,
         ollama_reachable=ollama_reachable,
         vllm_reachable=vllm_reachable,
-        mistralrs_available=mistralrs_available,
+        llama_server_installed=llama_server_installed,
     )
 
 

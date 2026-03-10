@@ -32,9 +32,8 @@ def test_profile_tier_values():
 
 def test_nano_features():
     fs = PROFILE_FEATURES[ProfileTier.NANO]
-    assert Feature.INPROCESS in fs
+    assert Feature.OLLAMA in fs
     assert Feature.CLOUD in fs
-    assert Feature.OLLAMA not in fs
     assert Feature.VLLM not in fs
     assert Feature.MCP not in fs
 
@@ -42,6 +41,7 @@ def test_nano_features():
 def test_small_features():
     fs = PROFILE_FEATURES[ProfileTier.SMALL]
     assert Feature.OLLAMA in fs
+    assert Feature.LLAMA_CPP in fs
     assert Feature.MCP in fs
     assert Feature.VLLM not in fs
     assert Feature.EMBEDDING not in fs
@@ -49,6 +49,7 @@ def test_small_features():
 
 def test_medium_features():
     fs = PROFILE_FEATURES[ProfileTier.MEDIUM]
+    assert Feature.OLLAMA in fs
     assert Feature.LLAMA_CPP in fs
     assert Feature.EMBEDDING in fs
     assert Feature.VLLM not in fs   # vLLM only on LARGE/SERVER
@@ -87,21 +88,21 @@ class _Overrides:
 def test_from_profile_uses_defaults():
     overrides = _Overrides()
     fs = FeatureSet.from_profile(ProfileTier.NANO, overrides)
-    assert fs.is_enabled(Feature.INPROCESS)
+    assert fs.is_enabled(Feature.OLLAMA)
     assert fs.is_enabled(Feature.CLOUD)
-    assert not fs.is_enabled(Feature.OLLAMA)
+    assert not fs.is_enabled(Feature.VLLM)
 
 
 def test_from_profile_override_enables():
-    overrides = _Overrides(ollama=True)
+    overrides = _Overrides(vllm=True)
     fs = FeatureSet.from_profile(ProfileTier.NANO, overrides)
-    assert fs.is_enabled(Feature.OLLAMA)  # forced on despite nano default
+    assert fs.is_enabled(Feature.VLLM)  # forced on despite nano default
 
 
 def test_from_profile_override_disables():
-    overrides = _Overrides(inprocess=False)
+    overrides = _Overrides(ollama=False)
     fs = FeatureSet.from_profile(ProfileTier.SMALL, overrides)
-    assert not fs.is_enabled(Feature.INPROCESS)  # forced off
+    assert not fs.is_enabled(Feature.OLLAMA)  # forced off
 
 
 # ---------------------------------------------------------------------------
@@ -175,3 +176,71 @@ def test_backend_priority_all_tiers():
     for tier in ProfileTier:
         assert tier in bp, f"Missing backend_priority for {tier.value}"
         assert len(bp[tier]) >= 2, f"backend_priority[{tier.value}] too short"
+
+
+# ---------------------------------------------------------------------------
+# Backend consolidation: inprocess removed, llama_cpp first-class
+# ---------------------------------------------------------------------------
+
+def test_no_inprocess_feature():
+    """Feature enum must NOT contain INPROCESS after backend consolidation."""
+    feature_values = {f.value for f in Feature}
+    assert "inprocess" not in feature_values
+
+
+def test_no_inprocess_in_any_profile():
+    """No profile tier should reference an inprocess feature."""
+    for tier in ProfileTier:
+        feature_values = {f.value for f in PROFILE_FEATURES[tier]}
+        assert "inprocess" not in feature_values, f"inprocess found in {tier.value}"
+
+
+def test_no_inprocess_in_backend_priority():
+    """inprocess must not appear in any tier's backend priority list."""
+    bp = backend_priority()
+    for tier in ProfileTier:
+        assert "inprocess" not in bp[tier], f"inprocess in priority for {tier.value}"
+
+
+def test_llama_cpp_in_small_plus_profiles():
+    """llama_cpp should be enabled on SMALL and above (not NANO)."""
+    assert Feature.LLAMA_CPP not in PROFILE_FEATURES[ProfileTier.NANO]
+    assert Feature.LLAMA_CPP in PROFILE_FEATURES[ProfileTier.SMALL]
+    assert Feature.LLAMA_CPP in PROFILE_FEATURES[ProfileTier.MEDIUM]
+    assert Feature.LLAMA_CPP in PROFILE_FEATURES[ProfileTier.LARGE]
+    assert Feature.LLAMA_CPP in PROFILE_FEATURES[ProfileTier.SERVER]
+
+
+def test_llama_cpp_in_all_backend_priorities():
+    """llama_cpp should appear in every tier's backend priority list."""
+    bp = backend_priority()
+    for tier in ProfileTier:
+        assert "llama_cpp" in bp[tier], f"llama_cpp missing from {tier.value} priority"
+
+
+def test_vllm_first_in_server_priority():
+    """SERVER tier should have vllm as first backend."""
+    bp = backend_priority()
+    assert bp[ProfileTier.SERVER][0] == "vllm"
+
+
+def test_vllm_not_in_nano_small_medium_priority():
+    """vllm should not appear in NANO, SMALL, or MEDIUM priority."""
+    bp = backend_priority()
+    assert "vllm" not in bp[ProfileTier.NANO]
+    assert "vllm" not in bp[ProfileTier.SMALL]
+    assert "vllm" not in bp[ProfileTier.MEDIUM]
+
+
+def test_vllm_in_large_and_server_priority():
+    """vllm should appear in LARGE and SERVER priority."""
+    bp = backend_priority()
+    assert "vllm" in bp[ProfileTier.LARGE]
+    assert "vllm" in bp[ProfileTier.SERVER]
+
+
+def test_cloud_in_all_priorities():
+    """cloud should be in every tier's priority as a fallback."""
+    bp = backend_priority()
+    for tier in ProfileTier:
+        assert "cloud" in bp[tier], f"cloud missing from {tier.value} priority"

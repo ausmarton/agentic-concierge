@@ -24,7 +24,6 @@ from agentic_concierge.config.constants import (
     LLM_DISCOVERY_TIMEOUT_S,
     LLM_PULL_TIMEOUT_S,
     default_backend_urls,
-    nano_gguf_filename,
 )
 
 logger = logging.getLogger(__name__)
@@ -38,7 +37,7 @@ class ResolvedLLM:
     model_config: ModelConfig  # full config (temperature, etc.) to use for chat
     warnings: list[str] = field(default_factory=list)
     fallback_used: bool = False
-    resolved_backend: str = ""  # "ollama", "vllm", "inprocess", "cloud"
+    resolved_backend: str = ""  # "ollama", "vllm", "llama_cpp", "cloud"
     available_models: list[str] = field(default_factory=list)
     all_chat_models: list[str] = field(default_factory=list)  # includes non-tool-calling models
 
@@ -324,16 +323,6 @@ def _ollama_pull(model: str, ollama_root: str, timeout_s: int = 600) -> bool:
         return False
 
 
-def _nano_model_path() -> str | None:
-    """Return path to the nano GGUF model file, or None if not present."""
-    try:
-        from platformdirs import user_data_path
-        path = user_data_path("agentic-concierge") / "models" / nano_gguf_filename()
-        return str(path) if path.exists() else None
-    except Exception:
-        return None
-
-
 def _get_profile_tier(config: ConciergeConfig):
     """Load the current profile tier from detected.json or config, defaulting to MEDIUM."""
     from agentic_concierge.config.features import ProfileTier
@@ -444,35 +433,6 @@ def _try_vllm(base_url: str, model_cfg: ModelConfig) -> ResolvedLLM | None:
     )
 
 
-def _try_inprocess(model_cfg: ModelConfig) -> ResolvedLLM | None:
-    """Try to resolve via in-process inference (mistral.rs + GGUF)."""
-    try:
-        from agentic_concierge.infrastructure.chat.inprocess import is_available
-        if not is_available():
-            return None
-    except ImportError:
-        return None
-    gguf = _nano_model_path()
-    if not gguf:
-        return None
-    resolved_config = ModelConfig(
-        base_url="",
-        model=gguf,
-        backend="inprocess",
-        api_key="",
-        temperature=model_cfg.temperature,
-        top_p=model_cfg.top_p,
-        max_tokens=model_cfg.max_tokens,
-        timeout_s=model_cfg.timeout_s,
-    )
-    return ResolvedLLM(
-        base_url="",
-        model=gguf,
-        model_config=resolved_config,
-        resolved_backend="inprocess",
-    )
-
-
 def _try_cloud(config: ConciergeConfig, model_cfg: ModelConfig) -> ResolvedLLM | None:
     """Try to find a cloud (generic) backend in config.models with an api_key."""
     for key, mc in config.models.items():
@@ -509,8 +469,6 @@ def _try_backend(
     elif backend_name == "vllm":
         url = urls["vllm"]
         return _try_vllm(url, model_cfg)
-    elif backend_name == "inprocess":
-        return _try_inprocess(model_cfg)
     elif backend_name == "cloud":
         return _try_cloud(config, model_cfg)
     return None
@@ -665,13 +623,13 @@ def resolve_llm(
     tier = _get_profile_tier(config)
     feature_set = FeatureSet.from_profile(tier, config.features)
     bp = backend_priority()
-    priority = bp.get(tier, ["ollama", "vllm", "inprocess", "cloud"])
+    priority = bp.get(tier, ["ollama", "llama_cpp", "vllm", "cloud"])
 
     # Map backend names to Feature flags for filtering
     _BACKEND_FEATURE = {
         "ollama": Feature.OLLAMA,
+        "llama_cpp": Feature.LLAMA_CPP,
         "vllm": Feature.VLLM,
-        "inprocess": Feature.INPROCESS,
         "cloud": Feature.CLOUD,
     }
 

@@ -130,14 +130,6 @@ async def run(
             models_to_pull.append(profile.quality_model)
         await _pull_models(models_to_pull)
 
-    # 6b. Download nano GGUF if inprocess is enabled and model is missing
-    if Feature.INPROCESS in profile_features:
-        from agentic_concierge.infrastructure.chat.inprocess import is_available
-        if is_available():
-            await _ensure_nano_model(interactive)
-        elif interactive:
-            _print_status("[dim]Skipping nano model (mistralrs not installed)[/dim]")
-
     # 7. Save detected profile
     save_detected(profile, path=detected_override)
     logger.info("Bootstrap complete: tier=%s saved to detected.json.", profile.tier.value)
@@ -181,72 +173,6 @@ def _print_profile_panel(probe: "SystemProbe", profile: "SystemProfile") -> None
         rprint(Panel.fit(body, title="[bold cyan]agentic-concierge bootstrap[/bold cyan]"))
     except Exception:
         pass
-
-
-async def _ensure_nano_model(interactive: bool) -> None:
-    """Download the nano GGUF model if not already present."""
-    from agentic_concierge.config.constants import nano_gguf_filename, nano_gguf_url
-
-    gguf_filename = nano_gguf_filename()
-    gguf_download_url = nano_gguf_url()
-
-    try:
-        from platformdirs import user_data_path
-        models_dir = user_data_path("agentic-concierge") / "models"
-    except Exception:
-        import os
-        models_dir = Path(os.path.expanduser("~")) / ".agentic-concierge" / "models"
-
-    gguf_path = models_dir / gguf_filename
-    if gguf_path.exists():
-        if interactive:
-            _print_status(f"[dim]Nano model already present: {gguf_path}[/dim]")
-        return
-
-    if interactive:
-        _print_status(f"[bold]Downloading nano model: {gguf_filename}[/bold]")
-
-    models_dir.mkdir(parents=True, exist_ok=True)
-    tmp_path = gguf_path.with_suffix(".download")
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=600.0, follow_redirects=True) as client:
-            async with client.stream("GET", gguf_download_url) as resp:
-                resp.raise_for_status()
-                total = int(resp.headers.get("content-length", 0))
-                if interactive and total > 0:
-                    from rich.progress import (
-                        BarColumn,
-                        DownloadColumn,
-                        Progress,
-                        TransferSpeedColumn,
-                        TimeRemainingColumn,
-                    )
-                    progress = Progress(
-                        "[progress.description]{task.description}",
-                        BarColumn(),
-                        DownloadColumn(),
-                        TransferSpeedColumn(),
-                        TimeRemainingColumn(),
-                    )
-                    task_id = progress.add_task(gguf_filename, total=total)
-                    with progress, open(tmp_path, "wb") as f:
-                        async for chunk in resp.aiter_bytes(chunk_size=1024 * 256):
-                            f.write(chunk)
-                            progress.update(task_id, advance=len(chunk))
-                else:
-                    with open(tmp_path, "wb") as f:
-                        async for chunk in resp.aiter_bytes(chunk_size=1024 * 256):
-                            f.write(chunk)
-        tmp_path.rename(gguf_path)
-        if interactive:
-            _print_status(f"[green]Nano model ready: {gguf_path}[/green]")
-    except Exception as e:
-        logger.warning("Failed to download nano GGUF: %s", e)
-        if interactive:
-            _print_status(f"[yellow]Could not download nano model: {e}[/yellow]")
-        if tmp_path.exists():
-            tmp_path.unlink()
 
 
 async def _pull_models(models: list[str]) -> None:

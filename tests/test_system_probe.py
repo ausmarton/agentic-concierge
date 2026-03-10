@@ -159,16 +159,16 @@ async def test_probe_system_ollama_reachable():
 
 
 @pytest.mark.asyncio
-async def test_probe_system_mistralrs_absent():
+async def test_probe_system_llama_server_not_installed():
     with (
         patch("agentic_concierge.bootstrap.system_probe._check_internet", return_value=False),
         patch("agentic_concierge.bootstrap.system_probe._check_ollama", return_value=False),
         patch("agentic_concierge.bootstrap.system_probe._check_vllm", return_value=False),
         patch("subprocess.run", side_effect=FileNotFoundError),
-        patch("importlib.util.find_spec", return_value=None),
+        patch("shutil.which", return_value=None),
     ):
         probe = await probe_system()
-    assert probe.mistralrs_available is False
+    assert probe.llama_server_installed is False
 
 
 @pytest.mark.asyncio

@@ -63,7 +63,9 @@ class LlamaCppBackend:
         model_dir: Directory containing ``.gguf`` model files.
         binary: Path or name of the ``llama-server`` binary.
         n_gpu_layers: Number of layers to offload to GPU (``-1`` = all).
-        ctx_size: Context window size.
+        ctx_size: Context window size per slot.
+        parallel: Number of concurrent request slots (``--parallel`` flag).
+            The actual KV cache size is ``ctx_size * parallel``.
         extra_args: Additional CLI arguments for ``llama-server``.
     """
 
@@ -73,12 +75,14 @@ class LlamaCppBackend:
         binary: str = "llama-server",
         n_gpu_layers: int = -1,
         ctx_size: int = 8192,
+        parallel: int = 1,
         extra_args: Optional[List[str]] = None,
     ) -> None:
         self._model_dir = model_dir
         self._binary = binary
         self._n_gpu_layers = n_gpu_layers
         self._ctx_size = ctx_size
+        self._parallel = max(1, parallel)
         self._extra_args = extra_args or []
         self._processes: Dict[str, _ManagedProcess] = {}
         self._next_port = _PORT_RANGE_START
@@ -164,12 +168,15 @@ class LlamaCppBackend:
         model_path = self._resolve_model_path(model_id)
         port = self._allocate_port()
 
+        # KV cache size = ctx_size_per_slot * parallel_slots
+        total_ctx = self._ctx_size * self._parallel
         cmd = [
             binary_path,
             "--model", model_path,
             "--port", str(port),
             "--host", "127.0.0.1",
-            "--ctx-size", str(self._ctx_size),
+            "--ctx-size", str(total_ctx),
+            "--parallel", str(self._parallel),
         ]
         if self._n_gpu_layers != 0:
             cmd.extend(["--n-gpu-layers", str(self._n_gpu_layers)])

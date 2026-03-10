@@ -1339,3 +1339,50 @@ Real-world usage revealed three friction points:
   Slightly longer first install, but the system is immediately capable.
 - Existing users with `CONCIERGE_EXTRA` set are unaffected.
 - vLLM auto-start and parallel backend preference are future work items in the backlog.
+
+---
+
+## ADR-034: Drop in-process backend; promote llama_cpp with --parallel
+
+**Status:** Accepted
+**Date:** 2026-03-10
+
+**Context:**
+Three backends — Ollama, llama_cpp (``llama-server``), and in-process (``mistralrs``) — all
+run the same underlying GGUF inference engine (llama.cpp). The in-process backend added
+complexity (PyO3 bindings, platform-specific wheels, ``[nano]`` optional extra) for marginal
+benefit: it eliminated one IPC hop but was limited to a single model, couldn't serve
+concurrent requests, and the ``mistralrs`` wheels were fragile across Python/OS versions.
+
+Meanwhile, ``llama-server`` supports ``--parallel N`` for concurrent request slots with
+shared KV cache, Vulkan GPU acceleration (works on AMD gfx1151 without ROCm), and process
+isolation. Ollama provides model registry, pulling, and system service management. The two
+are complementary, not redundant.
+
+**Decision:**
+1. **Remove the in-process backend entirely.** Delete ``Feature.INPROCESS``,
+   ``InProcessChatClient``, ``_ensure_nano_model()``, ``probe_inprocess()``, nano GGUF
+   config (``nano_gguf_filename``, ``nano_gguf_url``), and the ``[nano]`` optional extra
+   from ``pyproject.toml``. Remove ``mistralrs`` as a dependency.
+
+2. **Add ``--parallel N`` to LlamaCppBackend.** New ``parallel`` parameter (default 1,
+   clamped to min 1). The subprocess command uses ``--ctx-size (ctx_size * parallel)``
+   and ``--parallel N``. Default in ``backends.yaml`` set to ``parallel: 4``.
+
+3. **Update tier priorities.** Remove ``inprocess`` from all tiers. Add ``llama_cpp`` to
+   all tiers (NANO through SERVER). SERVER tier puts ``vllm`` first. Specific ordering:
+   - nano/small/medium: ``[ollama, llama_cpp, cloud]``
+   - large: ``[ollama, llama_cpp, vllm, cloud]``
+   - server: ``[vllm, ollama, llama_cpp, cloud]``
+
+4. **Keep both Ollama and llama_cpp** as complementary backends. Ollama handles model
+   management/UX (~90% of local LLM users). llama_cpp handles concurrent inference
+   (``--parallel``), Vulkan GPU support, and process isolation.
+
+**Consequences:**
+- Simpler dependency tree: no PyO3 bindings, no platform-specific ``mistralrs`` wheels.
+- ``Feature`` enum has 9 members (was 10); ``_FALLBACK_BACKEND_PRIORITY`` references only
+  ``ollama``, ``llama_cpp``, ``vllm``, ``cloud``.
+- ``LlamaCppBackend(parallel=4)`` enables 4 concurrent request slots per process, at the
+  cost of ~4x KV cache memory. Performance: ~25 t/s at 1 slot → ~17 t/s at 3 slots.
+- Supersedes ADR-012 (three-layer stack) and ADR-014 (in-process as bootstrap layer).

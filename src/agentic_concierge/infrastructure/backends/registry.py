@@ -239,7 +239,7 @@ class BackendRegistry:
                 tier_enum = ProfileTier(tier.lower())
             except ValueError:
                 pass
-        priority_list = bp.get(tier_enum, ["ollama", "vllm", "inprocess", "cloud"])
+        priority_list = bp.get(tier_enum, ["ollama", "llama_cpp", "vllm", "cloud"])
 
         registry = cls()
 

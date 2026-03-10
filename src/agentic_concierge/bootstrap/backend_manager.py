@@ -73,8 +73,6 @@ class BackendManager:
         from agentic_concierge.config.features import Feature
 
         coros: Dict[str, Any] = {}  # type: ignore[type-arg]
-        if feature_set.is_enabled(Feature.INPROCESS):
-            coros["inprocess"] = asyncio.to_thread(self.probe_inprocess)
         if feature_set.is_enabled(Feature.OLLAMA):
             coros["ollama"] = self.probe_ollama()
         if feature_set.is_enabled(Feature.LLAMA_CPP):
@@ -95,7 +93,6 @@ class BackendManager:
 
         # Mark disabled backends (no probe, zero cost)
         for feature, name in [
-            (Feature.INPROCESS, "inprocess"),
             (Feature.OLLAMA, "ollama"),
             (Feature.LLAMA_CPP, "llama_cpp"),
             (Feature.VLLM, "vllm"),
@@ -105,22 +102,6 @@ class BackendManager:
 
         self._health = results
         return results
-
-    def probe_inprocess(self) -> BackendHealth:
-        """Check if the in-process mistral.rs backend is available (sync)."""
-        import importlib.util
-        available = importlib.util.find_spec("mistralrs") is not None
-        if available:
-            return BackendHealth(
-                name="inprocess",
-                status=BackendStatus.HEALTHY,
-                hint="mistral.rs in-process inference available.",
-            )
-        return BackendHealth(
-            name="inprocess",
-            status=BackendStatus.NOT_AVAILABLE,
-            hint="Install with: pip install 'agentic-concierge[nano]'",
-        )
 
     async def probe_ollama(self) -> BackendHealth:
         """Check Ollama health and list available models."""

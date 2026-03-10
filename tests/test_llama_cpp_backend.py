@@ -424,3 +424,111 @@ class TestExtraArgs:
         call_args = mock_exec.call_args[0]
         assert "--no-mmap" in call_args
         assert "--flash-attn" in call_args
+
+
+# ---------------------------------------------------------------------------
+# Parallel slots (--parallel N)
+# ---------------------------------------------------------------------------
+
+
+class TestParallelSlots:
+
+    def test_default_parallel_is_one(self):
+        backend = LlamaCppBackend()
+        assert backend._parallel == 1
+
+    def test_parallel_stored(self):
+        backend = LlamaCppBackend(parallel=4)
+        assert backend._parallel == 4
+
+    def test_parallel_zero_clamped_to_one(self):
+        backend = LlamaCppBackend(parallel=0)
+        assert backend._parallel == 1
+
+    def test_parallel_negative_clamped_to_one(self):
+        backend = LlamaCppBackend(parallel=-3)
+        assert backend._parallel == 1
+
+    @pytest.mark.asyncio
+    async def test_load_passes_parallel_flag(self, tmp_path: Path):
+        """--parallel N appears in subprocess args when parallel=N."""
+        model_file = tmp_path / "test.gguf"
+        model_file.write_bytes(b"\x00" * 1024)
+
+        backend = LlamaCppBackend(model_dir=str(tmp_path), parallel=4)
+        fake_proc = _fake_process()
+
+        with patch("shutil.which", return_value="/usr/bin/llama-server"), \
+             patch("asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=fake_proc) as mock_exec, \
+             patch.object(backend, "_wait_for_health", new_callable=AsyncMock):
+
+            await backend.load_model("test.gguf")
+
+        call_args = mock_exec.call_args[0]
+        idx = call_args.index("--parallel")
+        assert call_args[idx + 1] == "4"
+
+    @pytest.mark.asyncio
+    async def test_load_ctx_size_scaled_by_parallel(self, tmp_path: Path):
+        """--ctx-size should be ctx_size * parallel."""
+        model_file = tmp_path / "test.gguf"
+        model_file.write_bytes(b"\x00" * 1024)
+
+        backend = LlamaCppBackend(model_dir=str(tmp_path), ctx_size=8192, parallel=4)
+        fake_proc = _fake_process()
+
+        with patch("shutil.which", return_value="/usr/bin/llama-server"), \
+             patch("asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=fake_proc) as mock_exec, \
+             patch.object(backend, "_wait_for_health", new_callable=AsyncMock):
+
+            await backend.load_model("test.gguf")
+
+        call_args = mock_exec.call_args[0]
+        idx = call_args.index("--ctx-size")
+        assert call_args[idx + 1] == str(8192 * 4)  # 32768
+
+    @pytest.mark.asyncio
+    async def test_load_default_parallel_one_unscaled_ctx(self, tmp_path: Path):
+        """parallel=1 → --ctx-size is just ctx_size (unscaled)."""
+        model_file = tmp_path / "test.gguf"
+        model_file.write_bytes(b"\x00" * 1024)
+
+        backend = LlamaCppBackend(model_dir=str(tmp_path), ctx_size=4096, parallel=1)
+        fake_proc = _fake_process()
+
+        with patch("shutil.which", return_value="/usr/bin/llama-server"), \
+             patch("asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=fake_proc) as mock_exec, \
+             patch.object(backend, "_wait_for_health", new_callable=AsyncMock):
+
+            await backend.load_model("test.gguf")
+
+        call_args = mock_exec.call_args[0]
+        idx_ctx = call_args.index("--ctx-size")
+        assert call_args[idx_ctx + 1] == "4096"
+        idx_par = call_args.index("--parallel")
+        assert call_args[idx_par + 1] == "1"
+
+    @pytest.mark.asyncio
+    async def test_parallel_and_extra_args_coexist(self, tmp_path: Path):
+        """parallel and extra_args don't interfere with each other."""
+        model_file = tmp_path / "test.gguf"
+        model_file.write_bytes(b"\x00" * 1024)
+
+        backend = LlamaCppBackend(
+            model_dir=str(tmp_path),
+            ctx_size=2048,
+            parallel=3,
+            extra_args=["--flash-attn"],
+        )
+        fake_proc = _fake_process()
+
+        with patch("shutil.which", return_value="/usr/bin/llama-server"), \
+             patch("asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=fake_proc) as mock_exec, \
+             patch.object(backend, "_wait_for_health", new_callable=AsyncMock):
+
+            await backend.load_model("test.gguf")
+
+        call_args = mock_exec.call_args[0]
+        assert call_args[call_args.index("--parallel") + 1] == "3"
+        assert call_args[call_args.index("--ctx-size") + 1] == str(2048 * 3)
+        assert "--flash-attn" in call_args

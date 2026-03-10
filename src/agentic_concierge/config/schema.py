@@ -49,7 +49,8 @@ class ModelConfig(BaseModel):
             "LLM client backend to use. "
             "'ollama' (default): Ollama-compatible client with 400-retry and tool-support detection. "
             "'generic': bare OpenAI-compatible client for cloud providers (OpenAI, Anthropic via "
-            "LiteLLM bridge, vLLM, LM Studio, etc.)."
+            "LiteLLM bridge, vLLM, LM Studio, etc.). "
+            "'vllm': vLLM-specific client for high-throughput concurrent inference."
         ),
     )
     temperature: float = 0.1
@@ -218,7 +219,6 @@ class FeaturesConfig(BaseModel):
     - ``False``: force-disable even if the profile enables it.
     """
 
-    inprocess: Optional[bool] = None
     ollama: Optional[bool] = None
     llama_cpp: Optional[bool] = None
     vllm: Optional[bool] = None
