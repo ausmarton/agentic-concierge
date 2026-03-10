@@ -30,7 +30,10 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(0);
             }
             UpdateCheckResult::AlreadyUpToDate => {
-                eprintln!("[concierge] already at latest version (v{})", env!("CARGO_PKG_VERSION"));
+                eprintln!(
+                    "[concierge] already at latest version (v{})",
+                    env!("CARGO_PKG_VERSION")
+                );
                 // Ensure the Python package is in sync even when the launcher
                 // binary is already current (recovers from failed prior upgrades).
                 let concierge_bin = config.venv_dir.join("bin").join("concierge-py");
@@ -48,7 +51,9 @@ fn main() -> anyhow::Result<()> {
                     std::env::consts::ARCH,
                     std::env::consts::OS,
                 );
-                eprintln!("[concierge] the release build may still be in progress — try again shortly");
+                eprintln!(
+                    "[concierge] the release build may still be in progress — try again shortly"
+                );
                 // Still upgrade the Python package even without a launcher binary
                 upgrade_package(&config, &version)?;
                 std::process::exit(0);

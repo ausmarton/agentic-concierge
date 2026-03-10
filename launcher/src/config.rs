@@ -51,9 +51,9 @@ pub fn launcher_config() -> Result<LauncherConfig, ConfigError> {
     // Default to "all" extras — install everything the hardware can support.
     // Users can override with CONCIERGE_EXTRA="" for bare-bones or a specific subset.
     let pypi_extra = match std::env::var("CONCIERGE_EXTRA") {
-        Ok(v) if v.is_empty() => None,          // explicit "" = no extras
-        Ok(v) => Some(v),                        // user-specified extras
-        Err(_) => Some("all".to_string()),       // default = all
+        Ok(v) if v.is_empty() => None,     // explicit "" = no extras
+        Ok(v) => Some(v),                  // user-specified extras
+        Err(_) => Some("all".to_string()), // default = all
     };
 
     Ok(LauncherConfig {
