@@ -55,9 +55,7 @@ from infrastructure or interfaces.
 │  RunResult      │        │    → implements ChatClient               │
 │  LLMResponse    │        │  VLLMChatClient (vLLM HTTP)              │
 │  ToolCallRequest│        │    → implements ChatClient               │
-│  RecruitError   │        │  InProcessChatClient (mistral.rs)        │
-│  FabricError    │        │    → implements ChatClient               │
-│                 │        │  FallbackChatClient (cloud quality gate) │
+│  RecruitError   │        │  FallbackChatClient (cloud quality gate) │
 │                 │        │    → wraps ChatClient                    │
 │                 │        │  LocalModelRuntime (V2)                  │
 │                 │        │    → implements ModelRuntime              │
@@ -145,9 +143,8 @@ src/agentic_concierge/
 ├── infrastructure/
 │   ├── chat/
 │   │   ├── __init__.py      build_chat_client() — factory dispatches on ModelConfig.backend
-│   │   │                      handles: "ollama", "generic", "vllm", "inprocess"
+│   │   │                      handles: "ollama", "generic", "vllm"
 │   │   ├── generic.py       GenericChatClient — bare OpenAI-compatible (no Ollama quirks)
-│   │   ├── inprocess.py     InProcessChatClient — mistral.rs via PyO3; lazy import
 │   │   ├── vllm.py          VLLMChatClient — OpenAI-compat HTTP + health check
 │   │   ├── _parser.py       parse_chat_response() — shared across clients
 │   │   └── fallback.py      FallbackChatClient — wraps client; applies FallbackPolicy

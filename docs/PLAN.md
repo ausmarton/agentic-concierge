@@ -250,16 +250,19 @@ This document defines **phases**, **deliverables**, and **verification gates** s
 
 ---
 
-## Phase 10: Self-sizing bootstrap, three-layer inference, profile-based features
+## Phase 10: Self-sizing bootstrap, multi-backend inference, profile-based features
+
+> **Note (ADR-034):** The in-process backend (mistral.rs) described below was later removed.
+> Current backends: Ollama, llama_cpp (managed llama-server with `--parallel`), vLLM, cloud.
+> ADR-012 and ADR-014 are superseded by ADR-034.
 
 **Goal:** The system detects its host environment on first run, selects an appropriate hardware
-profile, starts an in-process tiny model immediately (zero setup), and configures Ollama and/or
-vLLM as full backends. Features that are not enabled by the profile consume zero resources
-(no imports, no processes, no RAM). After this phase, `concierge` works out of the box on any
-hardware from a 4 GB RAM laptop to a multi-GPU server with no manual configuration required.
+profile, and configures Ollama and/or vLLM as full backends. Features that are not enabled
+by the profile consume zero resources (no imports, no processes, no RAM). After this phase,
+`concierge` works out of the box on any hardware from a 4 GB RAM laptop to a multi-GPU server
+with no manual configuration required.
 
-**See also:** ADR-012 (three-layer inference), ADR-013 (feature flags), ADR-014 (in-process
-bootstrap), ADR-015 (vLLM first-class), ADR-016 (Rust launcher — Phase 13).
+**See also:** ADR-013 (feature flags), ADR-015 (vLLM first-class), ADR-034 (backend consolidation).
 
 ### New files
 

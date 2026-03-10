@@ -61,10 +61,10 @@ We **use Ollama** for local inference by default (default config points at local
 - **FR4.1** Default configuration shall use **Ollama** (base_url http://localhost:11434/v1, models e.g. qwen2.5:7b / qwen2.5:14b) and define two model profiles (`fast`, `quality`) and three template specialists with their workflows. The fabric shall **ensure the local LLM is available by default** (check reachability; if unreachable, start via `local_llm_start_cmd` and wait for readiness); config may set `local_llm_ensure_available: false` to opt out.
 - **FR4.2** If `CONCIERGE_CONFIG_PATH` is set to a valid file path, that file (JSON or YAML) shall be loaded and used as the fabric config; otherwise defaults are used.
 - **FR4.3** Configuration supports:
-  - `models`: keyed model configs with backend type (`ollama`, `generic`, `vllm`, `inprocess`), base_url, model name, API key, and parameters.
+  - `models`: keyed model configs with backend type (`ollama`, `generic`, `vllm`), base_url, model name, API key, and parameters.
   - `specialists`: keyed specialist configs with description, capabilities, optional `tools` list (for dynamic packs), optional `builder` (custom factory), `mcp_servers`, and `container_image`.
   - `profile`: hardware profile tier (`auto`, `nano`, `small`, `medium`, `large`, `server`).
-  - `features`: per-feature overrides (inprocess, ollama, vllm, cloud, mcp, browser, embedding, telemetry, container).
+  - `features`: per-feature overrides (ollama, llama_cpp, vllm, cloud, mcp, browser, embedding, telemetry, container).
   - `resource_limits`: max_concurrent_agents, max_ram_mb, max_gpu_vram_mb.
   - `run_index`: embedding model, provider (`jsonl`/`chromadb`), ChromaDB settings.
   - `cloud_fallback`: model_key + policy (`no_tool_calls`/`malformed_args`/`always`).
@@ -122,7 +122,7 @@ We **use Ollama** for local inference by default (default config points at local
 
 ### FR12: Multi-backend LLM support
 
-- **FR12.1** `ModelConfig.backend` selects the LLM client: `ollama` (default, with 400-retry and tool-support detection), `generic` (bare OpenAI-compatible), `vllm`, `inprocess` (mistral.rs via PyO3).
+- **FR12.1** `ModelConfig.backend` selects the LLM client: `ollama` (default, with 400-retry and tool-support detection), `generic` (bare OpenAI-compatible), `vllm`.
 - **FR12.2** `cloud_fallback` config wraps the chat client with `FallbackChatClient`; triggers when the configured policy fires (e.g. local model returns no tool calls).
 - **FR12.3** Adaptive backend resolution: `resolve_llm()` falls back through `BACKEND_PRIORITY[tier]` when the primary backend is unreachable. Probes backends in order; first to return models is used.
 - **FR12.4** Model selection: `select_model()` sorts available models by closest parameter-size distance to the configured model, with same-family preference and tool-incapable model filtering.

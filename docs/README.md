@@ -12,7 +12,7 @@ All docs live here and in the repo root. Use this index to find the right docume
 | [BACKENDS.md](BACKENDS.md) | Using backends other than Ollama (vLLM, LiteLLM, OpenAI, llama.cpp). |
 | [MCP_INTEGRATIONS.md](MCP_INTEGRATIONS.md) | Connecting MCP tool servers (GitHub, Confluence, Jira, filesystem). Config examples. |
 | [CAPABILITIES.md](CAPABILITIES.md) | Capability model, routing keywords, and how to add a new capability. |
-| [LLM_OPTIONS.md](LLM_OPTIONS.md) | All LLM deployment options: on-host, in-process, container, remote. Pros/cons. |
+| [LLM_OPTIONS.md](LLM_OPTIONS.md) | All LLM deployment options: on-host, container, remote. Pros/cons. |
 
 ---
 
@@ -56,7 +56,7 @@ All docs live here and in the repo root. Use this index to find the right docume
 | [../REQUIREMENTS.md](../REQUIREMENTS.md) | ~120 | MVP functional requirements and validation |
 | [../LICENSE](../LICENSE) | 21 | MIT License |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | ~300 | Hexagonal layers, component map, data flow, runlog |
-| [DECISIONS.md](DECISIONS.md) | ~300 | 11 ADRs with rationale and consequences |
+| [DECISIONS.md](DECISIONS.md) | ~1400 | 34 ADRs with rationale and consequences |
 | [VISION.md](VISION.md) | ~145 | Vision, principles, phases 1–8 history, phase 9+ roadmap |
 | [PLAN.md](PLAN.md) | ~220 | Phase deliverables and verification gates |
 | [STATE.md](STATE.md) | ~210 | Phase 8 complete; CI 368; resumability guide |

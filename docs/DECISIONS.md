@@ -299,7 +299,7 @@ this because the connection/disconnection calls are themselves async (MCP SDK us
 
 ## ADR-012: Three-layer inference stack (in-process / Ollama / vLLM)
 
-**Status:** Accepted
+**Status:** Superseded by ADR-034
 **Date:** 2026-02-26
 
 **Context:** We need a single system that works on hardware ranging from a 4 GB RAM laptop to a
@@ -390,7 +390,7 @@ Individual features can be overridden in `config.yaml` `features:` block regardl
 
 ## ADR-014: In-process inference as bootstrap layer and permanent routing brain
 
-**Status:** Accepted
+**Status:** Superseded by ADR-034
 **Date:** 2026-02-26
 
 **Context:** A key design goal is "works on first run without any prior setup". If the only
@@ -587,18 +587,18 @@ iterate through `BACKEND_PRIORITY[tier]` — a per-profile ordered list of backe
 — filtered by enabled features, skipping the already-tried primary.
 
 The priority order per profile tier:
-- NANO: `["inprocess", "ollama", "cloud"]`
-- SMALL: `["ollama", "inprocess", "cloud"]`
-- MEDIUM: `["ollama", "vllm", "inprocess", "cloud"]`
-- LARGE: `["vllm", "ollama", "inprocess", "cloud"]`
-- SERVER: `["vllm", "ollama", "inprocess", "cloud"]`
+- NANO: `["ollama", "llama_cpp", "cloud"]`
+- SMALL: `["ollama", "llama_cpp", "cloud"]`
+- MEDIUM: `["ollama", "llama_cpp", "cloud"]`
+- LARGE: `["ollama", "llama_cpp", "vllm", "cloud"]`
+- SERVER: `["vllm", "ollama", "llama_cpp", "cloud"]`
+
+*(Updated by ADR-034: in-process removed, llama_cpp added to all tiers.)*
 
 Each backend is probed with a dedicated `_try_<backend>()` helper:
 - `_try_ollama()`: discovers models; if unreachable and `shutil.which("ollama")` finds
   the binary, auto-starts via `ensure_llm_available()` with a 30 s timeout.
 - `_try_vllm()`: probes the OpenAI-compatible `/v1/models` endpoint.
-- `_try_inprocess()`: checks `is_available()` from the mistral.rs module and looks for
-  a GGUF model file at the platformdirs data path.
 - `_try_cloud()`: scans `config.models` for a `backend="generic"` entry with a non-empty
   `api_key`.
 
@@ -631,8 +631,7 @@ ADR-013's table that said "server drops Ollama".
   is in use and can fix the primary backend.
 - `BACKEND_PRIORITY` is a new constant in `config/features.py` that must be maintained
   alongside `PROFILE_FEATURES` when new profiles or backends are added.
-- Bootstrap (`first_run.py`) gains `_ensure_nano_model()` for GGUF auto-download, making
-  the inprocess backend viable as a fallback without manual model download.
+- *(Note: `_ensure_nano_model()` and `_try_inprocess()` were removed by ADR-034.)*
 - 11 new tests cover fallback scenarios, feature gating, auto-start, comprehensive error
   messages, and `_try_backend` unit tests.
 

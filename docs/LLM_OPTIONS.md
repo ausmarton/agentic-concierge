@@ -4,6 +4,12 @@ This document is a **critical review of every practical way** LLMs can run for t
 
 **Related:** [BACKENDS.md](BACKENDS.md) (we are not locked to Ollama; deployment philosophy). [VISION.md](VISION.md) (local-first, quality, portability).
 
+> **Note (ADR-034, 2026-03-10):** The "in-process" option (§5) was evaluated and implemented
+> as `InProcessChatClient` via mistral.rs/PyO3, then **removed** in favour of managed
+> `llama-server` processes (`LlamaCppBackend` with `--parallel N`). The section below is
+> retained for reference but is no longer an active deployment option. Current backends:
+> **Ollama**, **llama_cpp** (managed llama-server), **vLLM**, **cloud/generic**.
+
 ---
 
 ## 1. What the fabric needs from an LLM

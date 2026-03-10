@@ -90,7 +90,7 @@ The orchestrator decomposes once into a flat list of specialist assignments. Com
 The current system has no concept of model loading/unloading:
 - Ollama manages models opaquely — no API to load/unload/query VRAM usage
 - vLLM serves one model per process
-- InProcess (mistral.rs) loads one model per client instance
+- llama_cpp manages one process per model with `--parallel` for concurrent slots
 - No resource awareness: can't answer "do I have VRAM for a 14B alongside an 8B?"
 - No acquire/release semantics: parallel specialists may try to use models that aren't loaded
 
@@ -144,7 +144,7 @@ The current system can route tasks and execute tool-calling loops, but lacks:
 3. **Per-subtask critique** — validate each decomposition step before execution
 4. **Heterogeneous model mix** — use multiple specialized models concurrently (coder for code, reasoning model for review, small model for routing)
 5. **Resource-aware scheduling** — know how much VRAM/RAM is available and schedule accordingly
-6. **Multi-backend orchestration** — use Ollama for quick tasks, vLLM for throughput, in-process for minimal tasks
+6. **Multi-backend orchestration** — use Ollama for quick tasks, vLLM for throughput, llama_cpp for concurrent slots
 
 The ideal system operates like a consultancy firm: many specialised consultants who don't know everything but know who to bring in for each sub-problem.
 
@@ -229,7 +229,7 @@ This gives full GPU acceleration at ~59 tok/s (7B). Ollama v0.17.7 (latest) supp
 | **MLX / vllm-mlx** | MLX **v0.31.0** / vllm-mlx **v0.2.6** | Metal + **CUDA** (new!) | Continuous batching via vllm-mlx | 20–87% faster than llama.cpp on Apple Silicon; now runs on NVIDIA too; MCP tool calling; Anthropic API compat |
 | **SGLang** | **v0.5.9** (Feb 24) | CUDA, ROCm (Instinct only) | One per process | ROCm 7 standardized; no gfx1151; LoRA overlap; Anthropic API compat |
 | **LM Studio** | **v0.4.6** (Feb 27) | CUDA, Metal, Vulkan, ROCm | Multiple via UI | AMD Variable Graphics Memory for 128B on Strix Halo; continuous batching; LM Link remote; Vulkan regressions in v0.4.4+ |
-| **mistral.rs** | — | CUDA, Metal, CPU | Per-process | In-process Rust; no network overhead; limited GPU/ecosystem |
+| ~~**mistral.rs**~~ | — | CUDA, Metal, CPU | Per-process | *(Removed by ADR-034 — replaced by managed llama-server with `--parallel`)* |
 
 ### 4.3 Backend Strategy (revised with March 2026 findings)
 
@@ -959,15 +959,15 @@ The following table maps every hardcoded assumption in v1 to its v2 solution:
 | 6 | Tool-incapable blocklist | `llm_discovery.py` `_TOOL_INCAPABLE_NAMES` | Deprecated static list; blocks entire model families | **Capability profiles replace blocklist** (§11.4) |
 | 7 | GPU/hardware thresholds | `model_advisor.py` | Fixed RAM/VRAM breakpoints (8/16/32/64 GB) | **Runtime resource detection** (§11.6) |
 | 8 | Backend detection | `backend_manager.py` | Only probes localhost default URLs | **Configurable endpoints + auto-discovery** (§11.5) |
-| 9 | Nano GGUF model | `constants.py` `NANO_GGUF_*` | Hardcoded to `qwen2.5-3b-instruct-q4_k_m.gguf` | **Smallest-available from catalog** (§11.3) |
-| 10 | In-process engine | `mistral.rs` only option | Single in-process backend; no alternatives | **InferenceBackend protocol** (§7.3); any engine implementing the protocol works |
+| 9 | ~~Nano GGUF model~~ | ~~`constants.py` `NANO_GGUF_*`~~ | *(Removed by ADR-034)* | **Smallest-available from catalog** (§11.3) |
+| 10 | ~~In-process engine~~ | ~~`mistral.rs`~~ | *(Removed by ADR-034 — replaced by llama_cpp `--parallel`)* | **InferenceBackend protocol** (§7.3) |
 | 11 | Specialist templates | `dynamic_pack.py` `PACK_TEMPLATES` | 3 hardcoded templates with fixed role descriptions | **Template files loaded from config directory** (§11.7) |
 | 12 | Profile tier features | `features.py` `PROFILE_FEATURES` | Hardcoded per tier (small/medium/large) | **Derived from actual available models** (§11.6) |
 
 ### 11.3 Externalized Model Catalog
 
 **Problem:** `_MODEL_TABLE` hardcodes `qwen2.5:3b`, `qwen2.5:7b`, `qwen2.5:14b` etc. When Qwen3.5-9B
-releases, someone must edit Python source code. `NANO_GGUF_FILENAME` is hardcoded to a specific file.
+releases, someone must edit Python source code. *(Note: `NANO_GGUF_*` constants removed by ADR-034.)*
 
 **Solution:** A YAML model catalog shipped with the package but overridable via `~/.config/concierge/models.yaml`
 or `CONCIERGE_MODELS_CATALOG` environment variable.
@@ -994,11 +994,8 @@ recommendations:
   researcher:
     preferred: ["qwen3.5:9b"]
 
-# Nano model for bootstrap/testing (replaces NANO_GGUF_*)
-nano:
-  ollama: "qwen3.5:3b"
-  gguf_url: "https://huggingface.co/Qwen/Qwen3.5-3B-GGUF/resolve/main/qwen3.5-3b-q4_k_m.gguf"
-  gguf_filename: "qwen3.5-3b-q4_k_m.gguf"
+# Nano model section removed by ADR-034 (in-process backend dropped)
+# Bootstrap uses Ollama-pulled models instead of standalone GGUF files
 ```
 
 **Resolution order:** User config → environment variable → shipped defaults.
@@ -1375,7 +1372,7 @@ Priority (highest → lowest):
 
 | Config file | Purpose | Shipped default? |
 |-------------|---------|-----------------|
-| `models.yaml` | Model recommendations per role; nano model | Yes |
+| `models.yaml` | Model recommendations per role | Yes |
 | `model_profiles.yaml` | Capability profiles per model family | Yes (as Python dict; YAML for overrides) |
 | `backends.yaml` | Backend URLs, priorities, platform filters | Yes |
 | `platform.yaml` | Hardware-specific env vars and preferences | Auto-detected; overridable |
@@ -1441,7 +1438,7 @@ re-introducing hardcoded assumptions.
    - Create `config/loader.py` — YAML config loader with resolution hierarchy (env → CLI → user → project → shipped)
    - Create shipped defaults: `config/defaults/models.yaml`, `model_profiles.yaml`, `backends.yaml`
    - Create `config/platform.py` — hardware/platform detection → `PlatformProfile`
-   - Migrate `_MODEL_TABLE`, `NANO_GGUF_*`, `DEFAULT_BACKEND_URLS`, `BACKEND_PRIORITY`, `PROFILE_FEATURES` to YAML defaults
+   - Migrate `_MODEL_TABLE`, `DEFAULT_BACKEND_URLS`, `BACKEND_PRIORITY`, `PROFILE_FEATURES` to YAML defaults *(NANO_GGUF_* removed by ADR-034)*
    - Remove `_TOOL_INCAPABLE_NAMES`; replace with `supports_tool_calling` in profiles
    - Migrate `PACK_TEMPLATES` to `config/defaults/templates/*.yaml`
 
@@ -1520,7 +1517,7 @@ get probed for capabilities.
 | `_review_specialist_work()` | Kept; reviewer gets its own model | Review logic is good; model selection changes |
 | `model_profiles.py` | **Externalized to YAML** + shipped defaults | Profiles loadable from config; `BUILTIN_PROFILES` becomes shipped default |
 | `model_advisor.py` `_MODEL_TABLE` | **Replaced by `models.yaml`** | Recommendations externalized; no code change needed for new models |
-| `constants.py` `NANO_GGUF_*` | **Replaced by `models.yaml` nano section** | Nano model configurable without code change |
+| ~~`constants.py` `NANO_GGUF_*`~~ | *(Removed by ADR-034)* | In-process backend dropped; llama_cpp uses Ollama-managed models |
 | `constants.py` `DEFAULT_BACKEND_URLS` | **Replaced by `backends.yaml`** | URLs, priorities, platform filters all in config |
 | `features.py` `BACKEND_PRIORITY` | **Replaced by `backends.yaml` priorities** | Ordering configurable; platform-aware |
 | `features.py` `PROFILE_FEATURES` | **Replaced by runtime resource detection** | No tiers; actual availability drives decisions |

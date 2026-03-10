@@ -1004,11 +1004,14 @@ README (Quick install section), CHANGELOG (Unreleased), BACKLOG (this section), 
 
 ---
 
-## Phase 10 — Self-sizing bootstrap, three-layer inference, profile-based features
+## Phase 10 — Self-sizing bootstrap, multi-backend inference, profile-based features
+
+> **Note (ADR-034):** The in-process/mistral.rs backend described in P10-7 and P10-9 was
+> later removed. ADR-012 and ADR-014 are superseded. Current backends: Ollama, llama_cpp, vLLM, cloud.
 
 **Status: COMPLETE — 2026-02-26 — 495 fast CI pass**
 **Spec:** See `docs/PLAN.md` Phase 10 section.
-**ADRs:** ADR-012 through ADR-016 in `docs/DECISIONS.md`.
+**ADRs:** ADR-012 through ADR-016 in `docs/DECISIONS.md` (ADR-012/014 superseded by ADR-034).
 **Target fast CI:** ~473 pass (+71 new tests across 7 new test files).
 
 Items are listed in implementation order — earlier items are prerequisites for later ones.

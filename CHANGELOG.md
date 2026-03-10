@@ -9,6 +9,48 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+---
+
+## [0.3.56] — 2026-03-10
+
+### Removed
+
+- **In-process backend (ADR-034):** Deleted `Feature.INPROCESS`, `InProcessChatClient`,
+  `_ensure_nano_model()`, `probe_inprocess()`, nano GGUF config (`nano_gguf_filename`,
+  `nano_gguf_url`), `[nano]` optional extra, and `mistralrs` dependency. The in-process
+  backend (mistral.rs via PyO3) added complexity for marginal benefit — Ollama and
+  llama_cpp cover all use cases with better concurrent request support.
+
+### Added
+
+- **`--parallel N` on LlamaCppBackend:** New `parallel` parameter (default 1) controls
+  concurrent request slots per llama-server process. The subprocess uses
+  `--ctx-size (ctx_size × parallel)` and `--parallel N`. Default in `backends.yaml`
+  set to `parallel: 4`.
+- 19 new tests: 8 parallel slot tests (`TestParallelSlots`), 11 backend consolidation
+  verification tests (no inprocess in Feature/profiles/priorities, llama_cpp in all tiers,
+  tier ordering assertions).
+- `docs/DECISIONS.md`: ADR-034. ADR-012 and ADR-014 marked as Superseded.
+
+### Changed
+
+- **Tier priorities updated:** Removed `inprocess` from all tiers. Added `llama_cpp` to
+  all tiers. SERVER tier puts `vllm` first:
+  - nano/small/medium: `[ollama, llama_cpp, cloud]`
+  - large: `[ollama, llama_cpp, vllm, cloud]`
+  - server: `[vllm, ollama, llama_cpp, cloud]`
+- `Feature` enum: 9 members (was 10); `LLAMA_CPP` replaces `INPROCESS`.
+- `PROFILE_FEATURES`: `LLAMA_CPP` enabled on SMALL through SERVER; NANO has only
+  `OLLAMA` and `CLOUD`.
+
+### Tests
+
+- Fast CI: **1455 pass** (was 1438 after deletions, +17 new tests). 25 Rust tests.
+
+---
+
+## [Unreleased — V2]
+
 ### Added
 
 **V2: Three-Layer Architecture — Model Runtime, Recursive Task Decomposition, Agent-Model Affinity**

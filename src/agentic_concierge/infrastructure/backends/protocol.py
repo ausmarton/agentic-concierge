@@ -144,7 +144,7 @@ class InferenceBackend(Protocol):
 
     @property
     def base_url(self) -> str:
-        """Base URL for the backend's API (empty string for in-process)."""
+        """Base URL for the backend's API (empty string for managed backends like llama_cpp)."""
         ...
 
     async def health_check(self) -> bool:

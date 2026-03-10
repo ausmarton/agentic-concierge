@@ -111,7 +111,7 @@ We can start with a small set of very specialised pillars (e.g. engineering + re
 
 - **Phases 9–14 (complete):**
   - Phase 9: CLI streaming (`--stream` / `-s` with Rich rendering); corrective re-prompt (up to 2 plain-text retries); per-IP rate limiting (`CONCIERGE_RATE_LIMIT`); sandbox absolute-path error hint.
-  - Phase 10: Self-sizing bootstrap (`SystemProbe`, `ProfileTier`, `FirstRunBootstrap`); three-layer inference (in-process via mistral.rs, Ollama, vLLM); profile-based feature flags (`FeatureSet`); `concierge doctor` and `concierge bootstrap` CLI commands.
+  - Phase 10: Self-sizing bootstrap (`SystemProbe`, `ProfileTier`, `FirstRunBootstrap`); multi-backend inference (Ollama, llama_cpp, vLLM); profile-based feature flags (`FeatureSet`); `concierge doctor` and `concierge bootstrap` CLI commands.
   - Phase 11: Browser tool (Playwright, feature-gated); ChromaDB vector store backend for run index; `MCPAugmentedPack` lifecycle fix for inner pack `aopen`/`aclose`.
   - Phase 12: Quality gates (Gates 1–3: prior work, required fields, pack-specific validation); `run_tests` tool; LLM orchestrator (`orchestrate_task`, `create_plan` tool, brief injection, result synthesis); session continuation (checkpoint, `concierge resume`, resumable runs).
   - Phase 13: Rust thin launcher (static binary, venv bootstrap, self-update, `install.sh`).
@@ -170,7 +170,7 @@ Use this checklist to keep the repo aligned with the vision.
 | Universal work review (Gate 4) | `_review_specialist_work()` in `execute_task.py`; `PROMPT_REVIEWER` in `prompts.py`; ADR-019 | **Done (post-Phase 14).** Independent reviewer LLM; read-only tools; approve/reject; fail-open; max 2 rejections. |
 | Enterprise (Confluence/Jira/GitHub/Rally) | `PACK_TEMPLATES[“enterprise_research”]` in `dynamic_pack.py`; `MCP_INTEGRATIONS.md`; `cross_run_search` tool in `tool_catalog.py` | **Done (Phase 7).** Enterprise research template with cross-run search; GitHub MCP integration tested; Confluence/Jira config examples in docs. |
 | Session continuation | `infrastructure/workspace/run_checkpoint.py`; `resume_execute_task()` in `execute_task.py`; `concierge resume` CLI | **Done (Phase 12).** Atomic checkpoint; resume interrupted runs; `(resumable)` marker in `logs list`. |
-| Multi-backend LLM | `infrastructure/chat/` — Ollama, Generic, vLLM, InProcess clients; `build_chat_client()` factory | **Done (Phases 4, 10).** Four backends; `ModelConfig.backend` selects; adaptive fallback via `BACKEND_PRIORITY`. |
+| Multi-backend LLM | `infrastructure/chat/` — Ollama, Generic, vLLM clients; `build_chat_client()` factory; `LlamaCppBackend` for managed llama-server | **Done (Phases 4, 10; ADR-034).** Three chat clients + llama_cpp backend; `ModelConfig.backend` selects; adaptive fallback via `BACKEND_PRIORITY`. |
 | Hardware profiles and bootstrap | `bootstrap/` package; `config/features.py`; `concierge doctor`/`bootstrap` CLI | **Done (Phase 10).** `SystemProbe`, `ProfileTier`, `FeatureSet`; zero-resource for disabled features. |
 | Browser tool | `infrastructure/tools/browser_tool.py`; `Feature.BROWSER` gating | **Done (Phase 11).** Playwright-based; feature-gated per profile; 6 async tool methods. |
 | Run index (cross-run memory) | `infrastructure/workspace/run_index.py`, `run_index_chroma.py`; `RunIndexConfig` | **Done (Phases 6–7, 11).** Keyword + semantic (Ollama embeddings) + ChromaDB vector store. |

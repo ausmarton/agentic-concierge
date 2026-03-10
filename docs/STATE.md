@@ -202,7 +202,8 @@ unrecoverable.
 `resolve_llm()` now falls back through `BACKEND_PRIORITY[tier]` when the configured
 primary backend is unreachable. Each backend is probed in order; the first to return
 models is used with `fallback_used=True` and a warning. Covers vLLM, Ollama (with
-auto-start), inprocess (mistral.rs + GGUF), and cloud (generic backend with api_key).
+auto-start), llama_cpp (managed llama-server processes), and cloud (generic backend with api_key).
+*(Note: in-process/mistral.rs removed by ADR-034; replaced by llama_cpp.)*
 SERVER profile now includes Ollama as a fallback backend.
 
 | Change | Files |
@@ -219,7 +220,7 @@ SERVER profile now includes Ollama as a fallback backend.
 
 ## Current phase: **V2 Three-Layer Architecture complete** (supersedes Phase 14)
 
-V2 implementation complete. **1429 tests pass** (22 Rust). All V1 code removed; graph checkpointing (ADR-032) replaces V1 resume.
+V2 implementation complete. **1455 tests pass** (25 Rust). All V1 code removed; graph checkpointing (ADR-032) replaces V1 resume. Backend consolidation (ADR-034): in-process removed, llama_cpp promoted with `--parallel`.
 
 ---
 
@@ -420,9 +421,9 @@ All Phase 1 functional requirements (FR1–FR6 in REQUIREMENTS.md) have automate
 | P10-4 | `config/schema.py` additions | Done | `FeaturesConfig`, `ResourceLimitsConfig`; `profile/features/resource_limits` on `ConciergeConfig` |
 | P10-5 | `bootstrap/detected.py` | Done | `detected_path()`, `save_detected()`, `load_detected()`, `is_first_run()` via platformdirs |
 | P10-6 | `bootstrap/backend_manager.py` | Done | `BackendStatus`, `BackendHealth`, `BackendManager`; feature-gated probing |
-| P10-7 | `infrastructure/chat/inprocess.py` | Done | `InProcessChatClient` lazy-imports mistralrs; `is_available()` |
+| P10-7 | `infrastructure/chat/inprocess.py` | Removed (ADR-034) | *(Deleted — in-process backend replaced by llama_cpp)* |
 | P10-8 | `infrastructure/chat/vllm.py` | Done | `VLLMChatClient`; pure httpx; `health_check()`, `list_models()`, `chat()` |
-| P10-9 | Update `build_chat_client()` | Done | Dispatches `”vllm”` and `”inprocess”` backends |
+| P10-9 | Update `build_chat_client()` | Done | Dispatches `”vllm”` backend *(inprocess removed by ADR-034)* |
 | P10-10 | `bootstrap/first_run.py` | Done | `run()` orchestrates probe→advise→ensure_ollama→pull→save |
 | P10-11 | `concierge doctor` CLI | Done | Rich table: hardware, profile, feature flags, backend health |
 | P10-12 | `concierge bootstrap` CLI | Done | Calls `first_run.run()`; `--profile`, `--non-interactive` |

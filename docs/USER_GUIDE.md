@@ -90,8 +90,7 @@ Optional extras:
 | `otel` | OpenTelemetry tracing (`opentelemetry-api`, `opentelemetry-sdk`) |
 | `embed` | ChromaDB vector index (`chromadb>=0.4`) |
 | `browser` | Headless browser tools (`playwright>=1.40`) |
-| `nano` | In-process inference (`mistralrs>=0.3`) |
-| `all` | All of the above (except `nano`) |
+| `all` | All of the above |
 
 Install with extras:
 
@@ -170,11 +169,11 @@ panels:
 
 | Tier | RAM | VRAM | Key features enabled |
 |------|-----|------|----------------------|
-| **NANO** | < 8 GB | — | In-process inference, cloud |
-| **SMALL** | 8–16 GB | < 4 GB | Ollama, MCP, browser, cloud |
-| **MEDIUM** | 16–32 GB | 4–12 GB | + vLLM, embeddings |
-| **LARGE** | 32–64 GB | 12–24 GB | + containerised workspaces |
-| **SERVER** | 64 GB+ | 24 GB+ | + telemetry; vLLM replaces Ollama |
+| **NANO** | < 8 GB | — | Ollama, cloud |
+| **SMALL** | 8–16 GB | < 4 GB | + llama_cpp, MCP, browser |
+| **MEDIUM** | 16–32 GB | 4–12 GB | + embeddings |
+| **LARGE** | 32–64 GB | 12–24 GB | + vLLM, containerised workspaces |
+| **SERVER** | 64 GB+ | 24 GB+ | + telemetry; vLLM first priority |
 
 ### Quick smoke test
 
@@ -792,7 +791,7 @@ Force-enable or force-disable individual features regardless of profile:
 `null` (or omitted) = use profile default. `true` = force enable.
 `false` = force disable.
 
-Available features: `inprocess`, `ollama`, `vllm`, `cloud`, `mcp`,
+Available features: `ollama`, `llama_cpp`, `vllm`, `cloud`, `mcp`,
 `browser`, `embedding`, `telemetry`, `container`.
 
 ### Telemetry (OpenTelemetry)
