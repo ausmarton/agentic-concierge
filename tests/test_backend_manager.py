@@ -127,13 +127,33 @@ async def test_probe_vllm_unreachable():
 
 
 # ---------------------------------------------------------------------------
+# probe_llama_cpp
+# ---------------------------------------------------------------------------
+
+def test_probe_llama_cpp_installed():
+    mgr = BackendManager()
+    with patch("shutil.which", return_value="/usr/bin/llama-server"):
+        health = mgr.probe_llama_cpp()
+    assert health.status == BackendStatus.HEALTHY
+    assert "llama-server" in health.hint.lower()
+
+
+def test_probe_llama_cpp_not_installed():
+    mgr = BackendManager()
+    with patch("shutil.which", return_value=None):
+        health = mgr.probe_llama_cpp()
+    assert health.status == BackendStatus.NOT_INSTALLED
+    assert "llama.cpp" in health.hint
+
+
+# ---------------------------------------------------------------------------
 # probe_all
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_probe_all_disabled_backend_not_probed():
     """Disabled backends are marked DISABLED without any I/O."""
-    # Only INPROCESS enabled; Ollama and vLLM disabled
+    # Only INPROCESS enabled; Ollama, llama_cpp, vLLM disabled
     fs = _fs(Feature.INPROCESS)
     mgr = BackendManager()
     with patch("importlib.util.find_spec", return_value=MagicMock()):
@@ -141,6 +161,7 @@ async def test_probe_all_disabled_backend_not_probed():
 
     assert result["inprocess"].status == BackendStatus.HEALTHY
     assert result["ollama"].status == BackendStatus.DISABLED
+    assert result["llama_cpp"].status == BackendStatus.DISABLED
     assert result["vllm"].status == BackendStatus.DISABLED
 
 

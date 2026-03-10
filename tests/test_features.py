@@ -49,13 +49,16 @@ def test_small_features():
 
 def test_medium_features():
     fs = PROFILE_FEATURES[ProfileTier.MEDIUM]
-    assert Feature.VLLM in fs
+    assert Feature.LLAMA_CPP in fs
     assert Feature.EMBEDDING in fs
+    assert Feature.VLLM not in fs   # vLLM only on LARGE/SERVER
     assert Feature.CONTAINER not in fs
 
 
 def test_large_features():
     fs = PROFILE_FEATURES[ProfileTier.LARGE]
+    assert Feature.LLAMA_CPP in fs
+    assert Feature.VLLM in fs
     assert Feature.CONTAINER in fs
     assert Feature.TELEMETRY not in fs
 
@@ -63,8 +66,8 @@ def test_large_features():
 def test_server_features():
     fs = PROFILE_FEATURES[ProfileTier.SERVER]
     assert Feature.TELEMETRY in fs
-    # Server includes Ollama as fallback (adaptive backend resolution)
     assert Feature.OLLAMA in fs
+    assert Feature.LLAMA_CPP in fs
     assert Feature.VLLM in fs
 
 

@@ -37,7 +37,8 @@ class Feature(str, Enum):
 
     INPROCESS = "inprocess"   # in-process inference via mistral.rs
     OLLAMA = "ollama"         # Ollama local LLM server
-    VLLM = "vllm"             # vLLM high-throughput server
+    LLAMA_CPP = "llama_cpp"   # managed llama-server processes (Vulkan/Metal/CUDA)
+    VLLM = "vllm"             # vLLM high-throughput server (CUDA/ROCm)
     CLOUD = "cloud"           # cloud LLM endpoints (OpenAI, Anthropic, etc.)
     MCP = "mcp"               # MCP tool servers
     BROWSER = "browser"       # headless browser tool (Playwright)
@@ -47,7 +48,9 @@ class Feature(str, Enum):
 
 
 # Default features enabled per profile tier.
-# Server profile drops Ollama (vLLM handles all throughput) and adds Telemetry.
+# llama_cpp is the preferred managed backend (Vulkan/Metal/CUDA — works everywhere).
+# vLLM is enabled on LARGE/SERVER where CUDA/ROCm is available for high-throughput.
+# Ollama is always available as the simplest backend.
 PROFILE_FEATURES: dict[ProfileTier, frozenset[Feature]] = {
     ProfileTier.NANO: frozenset({
         Feature.INPROCESS,
@@ -63,7 +66,7 @@ PROFILE_FEATURES: dict[ProfileTier, frozenset[Feature]] = {
     ProfileTier.MEDIUM: frozenset({
         Feature.INPROCESS,
         Feature.OLLAMA,
-        Feature.VLLM,
+        Feature.LLAMA_CPP,
         Feature.CLOUD,
         Feature.MCP,
         Feature.EMBEDDING,
@@ -72,6 +75,7 @@ PROFILE_FEATURES: dict[ProfileTier, frozenset[Feature]] = {
     ProfileTier.LARGE: frozenset({
         Feature.INPROCESS,
         Feature.OLLAMA,
+        Feature.LLAMA_CPP,
         Feature.VLLM,
         Feature.CLOUD,
         Feature.MCP,
@@ -82,6 +86,7 @@ PROFILE_FEATURES: dict[ProfileTier, frozenset[Feature]] = {
     ProfileTier.SERVER: frozenset({
         Feature.INPROCESS,
         Feature.OLLAMA,
+        Feature.LLAMA_CPP,
         Feature.VLLM,
         Feature.CLOUD,
         Feature.MCP,
@@ -99,9 +104,9 @@ PROFILE_FEATURES: dict[ProfileTier, frozenset[Feature]] = {
 _FALLBACK_BACKEND_PRIORITY: dict[ProfileTier, list[str]] = {
     ProfileTier.NANO: ["inprocess", "ollama", "cloud"],
     ProfileTier.SMALL: ["ollama", "inprocess", "cloud"],
-    ProfileTier.MEDIUM: ["ollama", "vllm", "inprocess", "cloud"],
-    ProfileTier.LARGE: ["vllm", "ollama", "inprocess", "cloud"],
-    ProfileTier.SERVER: ["vllm", "ollama", "inprocess", "cloud"],
+    ProfileTier.MEDIUM: ["ollama", "llama_cpp", "inprocess", "cloud"],
+    ProfileTier.LARGE: ["ollama", "llama_cpp", "vllm", "inprocess", "cloud"],
+    ProfileTier.SERVER: ["ollama", "llama_cpp", "vllm", "inprocess", "cloud"],
 }
 
 _cached_backend_priority: dict[ProfileTier, list[str]] | None = None

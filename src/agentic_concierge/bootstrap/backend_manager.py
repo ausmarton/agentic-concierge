@@ -57,9 +57,11 @@ class BackendManager:
         self,
         ollama_base_url: str = "http://localhost:11434",
         vllm_base_url: str = "http://localhost:8000",
+        llama_cpp_base_url: str = "http://localhost:8100",
     ) -> None:
         self.ollama_base_url = ollama_base_url
         self.vllm_base_url = vllm_base_url
+        self.llama_cpp_base_url = llama_cpp_base_url
         self._health: Dict[str, BackendHealth] = {}
 
     async def probe_all(self, feature_set: "FeatureSet") -> Dict[str, BackendHealth]:
@@ -75,6 +77,8 @@ class BackendManager:
             coros["inprocess"] = asyncio.to_thread(self.probe_inprocess)
         if feature_set.is_enabled(Feature.OLLAMA):
             coros["ollama"] = self.probe_ollama()
+        if feature_set.is_enabled(Feature.LLAMA_CPP):
+            coros["llama_cpp"] = asyncio.to_thread(self.probe_llama_cpp)
         if feature_set.is_enabled(Feature.VLLM):
             coros["vllm"] = self.probe_vllm(self.vllm_base_url)
 
@@ -93,6 +97,7 @@ class BackendManager:
         for feature, name in [
             (Feature.INPROCESS, "inprocess"),
             (Feature.OLLAMA, "ollama"),
+            (Feature.LLAMA_CPP, "llama_cpp"),
             (Feature.VLLM, "vllm"),
         ]:
             if not feature_set.is_enabled(feature):
@@ -152,6 +157,36 @@ class BackendManager:
                 error=str(e),
                 hint="Start Ollama with: ollama serve",
             )
+
+    def probe_llama_cpp(self) -> BackendHealth:
+        """Check if llama-server is installed and if any managed processes are running."""
+        binary = shutil.which("llama-server")
+        if binary is None:
+            return BackendHealth(
+                name="llama_cpp",
+                status=BackendStatus.NOT_INSTALLED,
+                hint="Install llama.cpp: https://github.com/ggerganov/llama.cpp#build",
+            )
+        # llama-server is installed; check if any managed instances are running
+        # by probing the port range used by LlamaCppBackend.
+        import socket
+        running_ports: list[int] = []
+        for port in range(8100, 8110):  # check first 10 ports in the range
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.1)
+                if s.connect_ex(("127.0.0.1", port)) == 0:
+                    running_ports.append(port)
+        if running_ports:
+            return BackendHealth(
+                name="llama_cpp",
+                status=BackendStatus.HEALTHY,
+                hint=f"llama-server running on port(s): {running_ports}",
+            )
+        return BackendHealth(
+            name="llama_cpp",
+            status=BackendStatus.HEALTHY,
+            hint="llama-server installed; models started on demand.",
+        )
 
     async def probe_vllm(self, base_url: str) -> BackendHealth:
         """Check vLLM health and list available models."""

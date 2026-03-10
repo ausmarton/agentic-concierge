@@ -220,6 +220,7 @@ class FeaturesConfig(BaseModel):
 
     inprocess: Optional[bool] = None
     ollama: Optional[bool] = None
+    llama_cpp: Optional[bool] = None
     vllm: Optional[bool] = None
     cloud: Optional[bool] = None
     mcp: Optional[bool] = None
