@@ -147,6 +147,16 @@ class InferenceBackend(Protocol):
         """Base URL for the backend's API (empty string for managed backends like llama_cpp)."""
         ...
 
+    @property
+    def supports_concurrent(self) -> bool:
+        """``True`` if the backend efficiently handles multiple concurrent requests.
+
+        vLLM: True (continuous batching).
+        llama_cpp with ``--parallel > 1``: True.
+        Ollama: False (serialises inference on a single GPU).
+        """
+        ...
+
     async def health_check(self) -> bool:
         """Return ``True`` if the backend is healthy and responsive.
 

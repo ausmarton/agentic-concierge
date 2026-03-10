@@ -2,9 +2,9 @@
 
 **Purpose:** Single source of truth for “where we are” so any human or agent can resume work across restarts and sessions.
 
-**Last updated:** 2026-03-10. Fast CI: **1429 pass** (`make test`).
-Rust launcher: **22 tests pass** (`make test-rust`).
-Branch: `v2a-config-loader` (ahead of main; not yet merged).
+**Last updated:** 2026-03-10. Fast CI: **1490 pass** (`make test`).
+Rust launcher: **27 tests pass** (`make test-rust`).
+Branch: `main`.
 
 ---
 
@@ -469,9 +469,9 @@ All Phase 1 functional requirements (FR1–FR6 in REQUIREMENTS.md) have automate
 **The backlog is the canonical source for what to work on next.**
 
 1. Read [BACKLOG.md](BACKLOG.md) — find the first non-done item; that is what to work on.
-2. Run `make test` — confirm **1429 pass** before touching code.
-3. Run `make test-rust` — confirm **22 pass**.
-4. V2 is complete on `v2a-config-loader` — merge to main and release when ready.
+2. Run `make test` — confirm **1455 pass** before touching code.
+3. Run `make test-rust` — confirm **27 pass**.
+4. V2 is merged to main and complete.
 5. See [DECISIONS.md](DECISIONS.md) for rationale behind key architectural choices.
 6. See [DESIGN_V2.md](DESIGN_V2.md) for V2 architecture design.
 

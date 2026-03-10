@@ -1305,7 +1305,7 @@ Checkpoint failures are fail-open (logged, not raised) — they never crash the 
 
 ## ADR-033: Maximal-default install and concurrent backend utilisation
 
-**Status:** Accepted
+**Status:** Implemented
 **Date:** 2026-03-10
 
 **Context:**
@@ -1326,18 +1326,25 @@ Real-world usage revealed three friction points:
 **Decision:**
 1. **Maximal-default extras** (implemented): Launcher defaults `pypi_extra` to `"all"` when
    `CONCIERGE_EXTRA` is unset. Users opt out with `CONCIERGE_EXTRA=""` for bare-bones.
-2. **vLLM auto-start** (backlog): Add `ensure_vllm()` to `BackendManager`, mirroring
-   `ensure_ollama()`. On SERVER profiles with GPU, auto-start vLLM with the best available
-   model. Backend priority already prefers vLLM on LARGE/SERVER tiers.
-3. **Backend preference for parallelism** (backlog): When the task graph has >1 concurrent
-   nodes, prefer backends that support concurrent requests (vLLM) over serial ones (Ollama).
-   This is a model assignment hint, not a hard requirement.
+2. **vLLM auto-start** (implemented): `ensure_vllm()` added to `BackendManager`, mirroring
+   `ensure_ollama()`. On SERVER profiles with GPU, auto-starts vLLM with the best available
+   model. Config fields: `vllm_ensure_available`, `vllm_start_cmd`, `vllm_model`,
+   `vllm_start_timeout_s`, `vllm_gpu_memory_utilization`.
+3. **Backend preference for parallelism** (implemented): `supports_concurrent` property on
+   `InferenceBackend` protocol. `prefer_concurrent` parameter threaded from affinity executor
+   (detects >1 executing nodes) through `assign_model()` to `runtime.acquire()`.
+   `LocalModelRuntime._acquire_locked()` filters to concurrent-capable backends first.
+4. **Connection pooling** (implemented): Lazy-initialized shared `httpx.AsyncClient` in
+   `OllamaChatClient`, `GenericOpenAIChatClient`, `VLLMChatClient`, and `OllamaBackend`.
+   Replaces per-call client creation for better connection reuse under concurrency.
 
 **Consequences:**
 - First-time `concierge` launch installs all extras by default (browser, embed, mcp, otel).
   Slightly longer first install, but the system is immediately capable.
 - Existing users with `CONCIERGE_EXTRA` set are unaffected.
-- vLLM auto-start and parallel backend preference are future work items in the backlog.
+- Concurrent graph nodes automatically prefer vLLM/llama_cpp(parallel>1) over Ollama.
+- HTTP connection pooling reduces overhead for concurrent Ollama/vLLM requests.
+- 35 new tests in `tests/test_ops_items.py` covering all items.
 
 ---
 

@@ -37,13 +37,19 @@ class VLLMChatClient:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._timeout = timeout_s
+        self._client: "httpx.AsyncClient | None" = None
+
+    def _get_client(self) -> "httpx.AsyncClient":
+        """Return the shared HTTP client, creating it lazily on first use."""
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=httpx.Timeout(self._timeout))
+        return self._client
 
     async def health_check(self) -> bool:
         """Return ``True`` if the vLLM server is healthy (``GET /health``)."""
         health_url = self._base_url.replace("/v1", "").rstrip("/") + "/health"
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(health_url, timeout=3.0)
+            resp = await self._get_client().get(health_url, timeout=3.0)
             return resp.status_code == 200
         except Exception:
             return False
@@ -54,10 +60,9 @@ class VLLMChatClient:
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    f"{self._base_url}/models", headers=headers, timeout=5.0
-                )
+            resp = await self._get_client().get(
+                f"{self._base_url}/models", headers=headers, timeout=5.0
+            )
             resp.raise_for_status()
             data = resp.json()
             return [m["id"] for m in data.get("data", [])]
@@ -95,12 +100,11 @@ class VLLMChatClient:
             "POST %s/chat/completions model=%s messages=%d tools=%d",
             self._base_url, model, len(messages), len(tools or []),
         )
-        timeout = httpx.Timeout(self._timeout)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(
-                f"{self._base_url}/chat/completions",
-                json=payload,
-                headers=headers,
-            )
+        client = self._get_client()
+        resp = await client.post(
+            f"{self._base_url}/chat/completions",
+            json=payload,
+            headers=headers,
+        )
         resp.raise_for_status()
         return parse_chat_response(resp.json())

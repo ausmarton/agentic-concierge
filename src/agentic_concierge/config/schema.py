@@ -349,6 +349,36 @@ class ConciergeConfig(BaseModel):
         90,
         description="Seconds to wait for local LLM server to become ready after start.",
     )
+    # vLLM auto-start (ADR-033 OPS-1)
+    vllm_ensure_available: bool = Field(
+        False,
+        description=(
+            "If True, ensure vLLM is running on SERVER/LARGE profiles with GPU. "
+            "Mirrors local_llm_ensure_available for Ollama. Default False because "
+            "vLLM requires a GPU and is not universally available."
+        ),
+    )
+    vllm_start_cmd: List[str] = Field(
+        default_factory=lambda: [
+            "python", "-m", "vllm.entrypoints.openai.api_server",
+        ],
+        description="Command to start vLLM. Model is appended as --model <model>.",
+    )
+    vllm_model: str = Field(
+        "",
+        description=(
+            "Model to serve with vLLM. When empty, auto-selects the best available "
+            "model from Ollama's model list. Set explicitly for deterministic startup."
+        ),
+    )
+    vllm_start_timeout_s: int = Field(
+        120,
+        description="Seconds to wait for vLLM server to become healthy after start.",
+    )
+    vllm_gpu_memory_utilization: float = Field(
+        0.9,
+        description="Fraction of GPU memory for vLLM (--gpu-memory-utilization). Default 0.9.",
+    )
     auto_pull_if_missing: bool = Field(
         True,
         description="If True (default), when no models are available at the configured backend (e.g. Ollama), pull auto_pull_model so one command works.",

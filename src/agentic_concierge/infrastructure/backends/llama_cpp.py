@@ -95,6 +95,10 @@ class LlamaCppBackend:
     def base_url(self) -> str:
         return ""  # no fixed URL — each process has its own port
 
+    @property
+    def supports_concurrent(self) -> bool:
+        return self._parallel > 1
+
     # -------------------------------------------------------------------
     # Health check
     # -------------------------------------------------------------------

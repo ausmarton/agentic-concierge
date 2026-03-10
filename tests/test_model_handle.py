@@ -238,6 +238,7 @@ class FakeModelRuntime:
         prefer_model: Optional[str] = None,
         require_tool_calling: bool = True,
         exclude_models: Optional[List[str]] = None,
+        prefer_concurrent: bool = False,
         timeout_s: float = 30.0,
     ) -> ModelHandle:
         slot = ModelSlot(model_id="test", backend="fake", refcount=1)

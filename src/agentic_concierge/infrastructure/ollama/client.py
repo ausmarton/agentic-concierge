@@ -30,12 +30,16 @@ class OllamaChatClient:
     request shape.  Falls back to a minimal payload (model + messages + stream)
     when the server returns 400, which some older Ollama versions do for unknown
     top-level parameters.
+
+    Uses a shared ``httpx.AsyncClient`` for connection pooling — concurrent
+    calls reuse TCP connections instead of opening a new socket per request.
     """
 
     def __init__(self, base_url: str, api_key: str = "", timeout_s: float = LLM_CHAT_DEFAULT_TIMEOUT_S):
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._timeout = timeout_s
+        self._client: "httpx.AsyncClient | None" = None
 
     async def chat(
         self,
@@ -67,48 +71,53 @@ class OllamaChatClient:
             "POST %s model=%s messages=%d tools=%d",
             url, model, len(messages), len(tools or []),
         )
-        timeout = httpx.Timeout(self._timeout)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            r = await client.post(url, headers=headers, json=payload)
-            if r.status_code == 400:
-                # Inspect the error body before retrying.
-                err_msg = _extract_error_message(r)
-                if "does not support tools" in err_msg.lower():
+        client = self._get_client()
+        r = await client.post(url, headers=headers, json=payload)
+        if r.status_code == 400:
+            # Inspect the error body before retrying.
+            err_msg = _extract_error_message(r)
+            if "does not support tools" in err_msg.lower():
+                raise RuntimeError(
+                    f"Model {model!r} does not support tool calling. "
+                    "Use a tool-capable model such as llama3.1:8b, "
+                    "mistral-small3.2:24b, or qwen2.5-coder:32b."
+                )
+            # Some backends 400 on unknown top-level params (temperature,
+            # top_p, …); retry with a minimal payload that still includes
+            # tools (required for tool calling).
+            logger.warning(
+                "400 from %s (model=%s): %s — retrying with minimal payload",
+                url, model, err_msg[:200],
+            )
+            payload_minimal: Dict[str, Any] = {
+                "model": model,
+                "messages": messages,
+                "stream": False,
+            }
+            if tools:
+                payload_minimal["tools"] = tools
+            r2 = await client.post(url, headers=headers, json=payload_minimal)
+            if r2.status_code == 400:
+                err_msg2 = _extract_error_message(r2)
+                if "does not support tools" in err_msg2.lower():
                     raise RuntimeError(
                         f"Model {model!r} does not support tool calling. "
                         "Use a tool-capable model such as llama3.1:8b, "
                         "mistral-small3.2:24b, or qwen2.5-coder:32b."
                     )
-                # Some backends 400 on unknown top-level params (temperature,
-                # top_p, …); retry with a minimal payload that still includes
-                # tools (required for tool calling).
-                logger.warning(
-                    "400 from %s (model=%s): %s — retrying with minimal payload",
-                    url, model, err_msg[:200],
-                )
-                payload_minimal: Dict[str, Any] = {
-                    "model": model,
-                    "messages": messages,
-                    "stream": False,
-                }
-                if tools:
-                    payload_minimal["tools"] = tools
-                r2 = await client.post(url, headers=headers, json=payload_minimal)
-                if r2.status_code == 400:
-                    err_msg2 = _extract_error_message(r2)
-                    if "does not support tools" in err_msg2.lower():
-                        raise RuntimeError(
-                            f"Model {model!r} does not support tool calling. "
-                            "Use a tool-capable model such as llama3.1:8b, "
-                            "mistral-small3.2:24b, or qwen2.5-coder:32b."
-                        )
-                r2.raise_for_status()
-                data = r2.json()
-            else:
-                r.raise_for_status()
-                data = r.json()
+            r2.raise_for_status()
+            data = r2.json()
+        else:
+            r.raise_for_status()
+            data = r.json()
 
         return parse_chat_response(data)
+
+    def _get_client(self) -> "httpx.AsyncClient":
+        """Return the shared HTTP client, creating it lazily on first use."""
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=httpx.Timeout(self._timeout))
+        return self._client
 
 
 def _extract_error_message(response: "httpx.Response") -> str:

@@ -163,6 +163,7 @@ async def assign_model(
     task_capabilities: Optional[List[str]] = None,
     exclude_models: Optional[List[str]] = None,
     node_model_map: Optional[Dict[str, str]] = None,
+    prefer_concurrent: bool = False,
 ) -> ModelAssignment:
     """Select and acquire the best model for an agent role.
 
@@ -207,6 +208,7 @@ async def assign_model(
             requirements,
             require_tool_calling=role.require_tool_calling,
             exclude_models=all_excludes if all_excludes else None,
+            prefer_concurrent=prefer_concurrent,
         )
         return ModelAssignment(
             role=role_name,
@@ -229,6 +231,7 @@ async def assign_model(
             requirements,
             require_tool_calling=role.require_tool_calling,
             exclude_models=exclude_models if exclude_models else None,
+            prefer_concurrent=prefer_concurrent,
         )
         return ModelAssignment(
             role=role_name,

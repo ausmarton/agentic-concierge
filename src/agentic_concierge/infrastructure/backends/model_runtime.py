@@ -117,6 +117,7 @@ class LocalModelRuntime:
         prefer_model: Optional[str] = None,
         require_tool_calling: bool = True,
         exclude_models: Optional[List[str]] = None,
+        prefer_concurrent: bool = False,
         timeout_s: float = 30.0,
     ) -> ModelHandle:
         """Ensure a model matching *requirements* is loaded; return a handle.
@@ -130,6 +131,8 @@ class LocalModelRuntime:
             require_tool_calling: Only consider tool-calling-capable models.
             exclude_models: Model IDs to exclude (e.g. for reviewer
                 must-differ-from constraint).
+            prefer_concurrent: Prefer models on backends that support
+                concurrent requests (e.g. vLLM, llama_cpp with parallel>1).
             timeout_s: Reserved for future use (eviction queue timeout).
 
         Raises:
@@ -141,6 +144,7 @@ class LocalModelRuntime:
                 prefer_model=prefer_model,
                 require_tool_calling=require_tool_calling,
                 exclude_models=exclude_models,
+                prefer_concurrent=prefer_concurrent,
             )
 
     async def _acquire_locked(
@@ -150,6 +154,7 @@ class LocalModelRuntime:
         prefer_model: Optional[str],
         require_tool_calling: bool,
         exclude_models: Optional[List[str]],
+        prefer_concurrent: bool = False,
     ) -> ModelHandle:
         excluded = set(exclude_models or [])
 
@@ -157,6 +162,16 @@ class LocalModelRuntime:
         # Skip the fast path when prefer_model is specified but not loaded;
         # this allows the slow path to discover and load the preferred model.
         loaded_ids = [mid for mid in self._slots if mid not in excluded]
+
+        # When prefer_concurrent, only consider loaded models on concurrent
+        # backends for the fast path; if none qualify, fall through to slow
+        # path where concurrent backends are tried first.
+        if prefer_concurrent:
+            loaded_ids = [
+                mid for mid in loaded_ids
+                if self._is_on_concurrent_backend(mid)
+            ]
+
         skip_fast = bool(prefer_model and prefer_model not in loaded_ids)
         if not skip_fast:
             selected = self._select_model(
@@ -166,11 +181,35 @@ class LocalModelRuntime:
                 return self._handle_for_loaded(selected)
 
         # --- Slow path: discover available models from backends ---
+        selected: Optional[str] = None
+
+        # When prefer_concurrent, try concurrent-capable backends first
+        if prefer_concurrent:
+            concurrent_map = await self._discover_available(concurrent_only=True)
+            concurrent_ids = [mid for mid in concurrent_map if mid not in excluded]
+            if concurrent_ids:
+                selected = self._select_model(
+                    concurrent_ids, requirements, require_tool_calling, prefer_model,
+                )
+                if selected is not None:
+                    logger.info(
+                        "Concurrent preference: selected %s from %s backend",
+                        selected, concurrent_map[selected].name,
+                    )
+
+        # Fallback to all backends
         model_backends = await self._discover_available()
+        if selected is not None:
+            # Merge concurrent mapping so the selected model uses the
+            # concurrent backend even if a serial backend has higher priority
+            model_backends.update(concurrent_map)  # type: ignore[possibly-undefined]
         all_ids = [mid for mid in model_backends if mid not in excluded]
-        selected = self._select_model(
-            all_ids, requirements, require_tool_calling, prefer_model,
-        )
+
+        if selected is None:
+            selected = self._select_model(
+                all_ids, requirements, require_tool_calling, prefer_model,
+            )
+
         if selected is None:
             raise RuntimeError(
                 f"No model matching requirements {requirements} is available. "
@@ -417,6 +456,14 @@ class LocalModelRuntime:
             require_tool_calling=require_tool_calling,
         )
 
+    def _is_on_concurrent_backend(self, model_id: str) -> bool:
+        """Check if a loaded model's backend supports concurrent requests."""
+        slot = self._slots.get(model_id)
+        if slot is None:
+            return False
+        backend = self._registry.get_backend(slot.backend)
+        return bool(backend and getattr(backend, "supports_concurrent", False))
+
     def _handle_for_loaded(self, model_id: str) -> ModelHandle:
         """Create a ``ModelHandle`` for an already-loaded model."""
         slot = self._slots[model_id]
@@ -430,14 +477,23 @@ class LocalModelRuntime:
         client = backend.build_client(model_id)
         return ModelHandle(slot=slot, chat_client=client, runtime=self)
 
-    async def _discover_available(self) -> Dict[str, Any]:
+    async def _discover_available(
+        self,
+        *,
+        concurrent_only: bool = False,
+    ) -> Dict[str, Any]:
         """Return ``model_id → backend`` for all available models.
 
         Queries all healthy backends in priority order.  First backend wins
         for models available on multiple backends.
+
+        When *concurrent_only* is True, only backends whose
+        ``supports_concurrent`` property is True are queried.
         """
         result: Dict[str, Any] = {}
         for backend in self._registry.healthy_backends():
+            if concurrent_only and not getattr(backend, "supports_concurrent", False):
+                continue
             try:
                 models = await backend.list_available()
             except Exception:

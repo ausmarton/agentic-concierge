@@ -68,6 +68,7 @@ class SimpleModelRuntime:
         prefer_model: Optional[str] = None,
         require_tool_calling: bool = True,
         exclude_models: Optional[List[str]] = None,
+        prefer_concurrent: bool = False,
         timeout_s: float = 30.0,
     ) -> ModelHandle:
         """Always returns the wrapped ChatClient, ignoring requirements."""

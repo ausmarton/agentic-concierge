@@ -14,7 +14,7 @@ referenced source files, and [DECISIONS.md](DECISIONS.md).
 **How to resume after an interruption**
 1. Read [STATE.md](STATE.md) — confirms current phase and last verified state.
 2. Read this file — find the first non-done item; that is what to work on.
-3. Run `make test` — confirm **1429 pass** before touching code.
+3. Run `make test` — confirm **1490 pass** before touching code.
 4. Start the item; mark it IN PROGRESS here and in STATE.md.
 
 ---
@@ -1229,7 +1229,7 @@ multi-backend architecture to fully utilise available hardware.
 
 ---
 
-### OPS-1: vLLM auto-start on SERVER/LARGE profiles
+### ~~OPS-1: vLLM auto-start on SERVER/LARGE profiles~~ **DONE 2026-03-10**
 
 **Why:** vLLM supports continuous batching — true concurrent model inference. The task graph
 already runs independent nodes in parallel via `asyncio.gather()`, but Ollama serialises
@@ -1254,7 +1254,7 @@ just like Ollama is today.
 
 ---
 
-### OPS-2: Parallel backend preference for concurrent task graph nodes
+### ~~OPS-2: Parallel backend preference for concurrent task graph nodes~~ **DONE 2026-03-10**
 
 **Why:** When the planner decomposes a task into 3+ independent sub-tasks, they can execute
 in parallel. But if all use Ollama (serial inference), the parallelism is wasted. The model
@@ -1277,7 +1277,7 @@ concurrent nodes.
 
 ---
 
-### OPS-3: Ollama connection pooling for concurrent requests
+### ~~OPS-3: Ollama connection pooling for concurrent requests~~ **DONE 2026-03-10**
 
 **Why:** Even without vLLM, Ollama (v0.14+) can handle concurrent requests. The current
 client creates a fresh `httpx.AsyncClient` per call with no connection pooling. Adding a

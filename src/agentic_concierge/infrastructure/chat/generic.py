@@ -35,6 +35,8 @@ class GenericChatClient:
     Suitable for cloud APIs and any server that faithfully implements the
     OpenAI ``/chat/completions`` spec.  Raises ``httpx.HTTPStatusError`` for
     any non-2xx response without retrying.
+
+    Uses a shared ``httpx.AsyncClient`` for connection pooling.
     """
 
     def __init__(
@@ -46,6 +48,7 @@ class GenericChatClient:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._timeout = timeout_s
+        self._client: "httpx.AsyncClient | None" = None
 
     async def chat(
         self,
@@ -77,8 +80,13 @@ class GenericChatClient:
             "POST %s model=%s messages=%d tools=%d",
             url, model, len(messages), len(tools or []),
         )
-        timeout = httpx.Timeout(self._timeout)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            r = await client.post(url, headers=headers, json=payload)
-            r.raise_for_status()
-            return parse_chat_response(r.json())
+        client = self._get_client()
+        r = await client.post(url, headers=headers, json=payload)
+        r.raise_for_status()
+        return parse_chat_response(r.json())
+
+    def _get_client(self) -> "httpx.AsyncClient":
+        """Return the shared HTTP client, creating it lazily on first use."""
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=httpx.Timeout(self._timeout))
+        return self._client

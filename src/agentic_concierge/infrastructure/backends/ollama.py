@@ -92,6 +92,13 @@ class OllamaBackend:
             self._base_url = self._base_url[:-3]
         self._api_key = ""
         self._timeout_s = 120.0
+        self._client: "httpx.AsyncClient | None" = None
+
+    def _get_client(self) -> "httpx.AsyncClient":
+        """Return the shared HTTP client, creating it lazily on first use."""
+        if self._client is None:
+            self._client = httpx.AsyncClient()
+        return self._client
 
     @property
     def name(self) -> str:
@@ -100,6 +107,11 @@ class OllamaBackend:
     @property
     def base_url(self) -> str:
         return self._base_url
+
+    @property
+    def supports_concurrent(self) -> bool:
+        # Ollama serialises inference on a single GPU.
+        return False
 
     @property
     def chat_url(self) -> str:
@@ -113,8 +125,7 @@ class OllamaBackend:
     async def health_check(self) -> bool:
         """Check if Ollama is healthy by querying ``GET /api/tags``."""
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(f"{self._base_url}/api/tags", timeout=3.0)
+            resp = await self._get_client().get(f"{self._base_url}/api/tags", timeout=3.0)
             return resp.status_code == 200
         except Exception:
             return False
@@ -126,8 +137,7 @@ class OllamaBackend:
     async def list_available(self) -> List[str]:
         """List all chat-capable model IDs via ``GET /api/tags``."""
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(f"{self._base_url}/api/tags", timeout=10.0)
+            resp = await self._get_client().get(f"{self._base_url}/api/tags", timeout=10.0)
             if resp.status_code != 200:
                 return []
             data = resp.json()
@@ -145,8 +155,7 @@ class OllamaBackend:
         needs size/family information.
         """
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(f"{self._base_url}/api/tags", timeout=10.0)
+            resp = await self._get_client().get(f"{self._base_url}/api/tags", timeout=10.0)
             if resp.status_code != 200:
                 return []
             data = resp.json()
@@ -161,8 +170,7 @@ class OllamaBackend:
     async def list_loaded(self) -> List[ModelSlot]:
         """List currently loaded models via ``GET /api/ps``."""
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(f"{self._base_url}/api/ps", timeout=5.0)
+            resp = await self._get_client().get(f"{self._base_url}/api/ps", timeout=5.0)
             if resp.status_code != 200:
                 return []
             data = resp.json()
@@ -195,12 +203,11 @@ class OllamaBackend:
         Uses ``keep_alive: "-1"`` to keep the model loaded indefinitely.
         """
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    f"{self._base_url}/api/generate",
-                    json={"model": model_id, "prompt": "", "keep_alive": "-1"},
-                    timeout=120.0,
-                )
+            resp = await self._get_client().post(
+                f"{self._base_url}/api/generate",
+                json={"model": model_id, "prompt": "", "keep_alive": "-1"},
+                timeout=120.0,
+            )
             resp.raise_for_status()
         except Exception as e:
             raise RuntimeError(f"Failed to load model {model_id!r} on Ollama: {e}") from e
@@ -217,12 +224,11 @@ class OllamaBackend:
     async def unload_model(self, model_id: str) -> None:
         """Unload a model via ``POST /api/generate`` with ``keep_alive: "0"``."""
         try:
-            async with httpx.AsyncClient() as client:
-                await client.post(
-                    f"{self._base_url}/api/generate",
-                    json={"model": model_id, "prompt": "", "keep_alive": "0"},
-                    timeout=30.0,
-                )
+            await self._get_client().post(
+                f"{self._base_url}/api/generate",
+                json={"model": model_id, "prompt": "", "keep_alive": "0"},
+                timeout=30.0,
+            )
         except Exception:
             logger.warning("Failed to unload model %s from Ollama", model_id, exc_info=True)
 
@@ -250,12 +256,11 @@ class OllamaBackend:
         Returns 0 if the estimate is unavailable.
         """
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    f"{self._base_url}/api/show",
-                    json={"name": model_id},
-                    timeout=10.0,
-                )
+            resp = await self._get_client().post(
+                f"{self._base_url}/api/show",
+                json={"name": model_id},
+                timeout=10.0,
+            )
             if resp.status_code != 200:
                 return 0
             data = resp.json()
@@ -289,13 +294,13 @@ class OllamaBackend:
         on success.
         """
         try:
-            async with httpx.AsyncClient() as client:
-                async with client.stream(
-                    "POST",
-                    f"{self._base_url}/api/pull",
-                    json={"name": model_id, "stream": True},
-                    timeout=httpx.Timeout(timeout_s, connect=30.0),
-                ) as resp:
+            client = self._get_client()
+            async with client.stream(
+                "POST",
+                f"{self._base_url}/api/pull",
+                json={"name": model_id, "stream": True},
+                timeout=httpx.Timeout(timeout_s, connect=30.0),
+            ) as resp:
                     if resp.status_code != 200:
                         return False
                     last_status = ""

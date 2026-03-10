@@ -88,20 +88,29 @@ async def execute_graph_with_affinity(
         # 1. Determine role
         role_name = determine_role(node.required_capabilities)
 
-        # 2. Assign model with constraints
+        # 2. Detect concurrent execution: count nodes currently executing
+        #    (including self — already transitioned to "executing" by graph_executor)
+        concurrent_count = sum(
+            1 for n in graph.nodes.values() if n.status == "executing"
+        )
+        prefer_concurrent = concurrent_count > 1
+
+        # 3. Assign model with constraints
         assignment = await assign_model(
             role_name,
             runtime,
             task_capabilities=node.required_capabilities,
             node_model_map=ctx.role_model_map,
+            prefer_concurrent=prefer_concurrent,
         )
 
         ctx.node_assignments[node.id] = assignment
         ctx.role_model_map[role_name] = assignment.model_id
 
         logger.info(
-            "Node %s (%s): role=%s model=%s",
+            "Node %s (%s): role=%s model=%s concurrent=%s",
             node.id, node.description[:40], role_name, assignment.model_id,
+            prefer_concurrent,
         )
 
         if on_event:
@@ -110,18 +119,19 @@ async def execute_graph_with_affinity(
                     "node_id": node.id,
                     "role": role_name,
                     "model_id": assignment.model_id,
+                    "prefer_concurrent": prefer_concurrent,
                 })
             except Exception:
                 pass
 
-        # 3. Preload hint for upcoming siblings
+        # 4. Preload hint for upcoming siblings
         _issue_preload_hints(node, graph, runtime)
 
-        # 4. Execute
+        # 5. Execute
         try:
             return await work_executor(node, graph, assignment)
         finally:
-            # 5. Release handle
+            # 6. Release handle
             try:
                 await runtime.release(assignment.handle)
             except Exception as exc:

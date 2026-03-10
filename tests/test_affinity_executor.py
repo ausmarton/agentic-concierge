@@ -51,6 +51,7 @@ class MockRuntime:
         prefer_model: Optional[str] = None,
         require_tool_calling: bool = True,
         exclude_models: Optional[List[str]] = None,
+        prefer_concurrent: bool = False,
         timeout_s: float = 30.0,
     ) -> MockHandle:
         # Pick model based on first matching capability

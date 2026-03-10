@@ -236,6 +236,77 @@ class BackendManager:
 
         return health
 
+    async def ensure_vllm(
+        self,
+        config: "ConciergeConfig",
+        feature_set: "FeatureSet",
+    ) -> BackendHealth:
+        """Ensure vLLM is running; attempt to start it if configured.
+
+        Mirrors ``ensure_ollama()`` but requires ``Feature.VLLM`` in the feature
+        set and ``config.vllm_ensure_available`` to be ``True``.
+
+        If vLLM is already healthy, returns immediately.  Otherwise, builds a
+        start command from config fields and polls ``/health`` until ready or
+        timeout.
+        """
+        from agentic_concierge.config.features import Feature
+
+        if not feature_set.is_enabled(Feature.VLLM):
+            return BackendHealth(name="vllm", status=BackendStatus.DISABLED)
+
+        health = await self.probe_vllm(self.vllm_base_url)
+        if health.status == BackendStatus.HEALTHY:
+            return health
+
+        if not config.vllm_ensure_available:
+            return health
+
+        # Determine model to serve
+        model = config.vllm_model
+        if not model:
+            # Auto-select from Ollama's available models (largest first)
+            try:
+                ollama_health = await self.probe_ollama()
+                if ollama_health.models:
+                    model = ollama_health.models[0]
+            except Exception:
+                pass
+        if not model:
+            logger.warning("vLLM auto-start: no model configured or discovered")
+            return BackendHealth(
+                name="vllm",
+                status=BackendStatus.UNREACHABLE,
+                error="No model for vLLM (set vllm_model in config)",
+                hint="Set vllm_model in config or ensure Ollama has models pulled.",
+            )
+
+        cmd = list(config.vllm_start_cmd) + [
+            "--model", model,
+            "--gpu-memory-utilization", str(config.vllm_gpu_memory_utilization),
+            "--host", "0.0.0.0",
+            "--port", str(self.vllm_base_url.split(":")[-1].rstrip("/")),
+        ]
+
+        logger.info("vLLM unreachable; starting with: %s", cmd)
+        try:
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            deadline = asyncio.get_event_loop().time() + config.vllm_start_timeout_s
+            while asyncio.get_event_loop().time() < deadline:
+                await asyncio.sleep(2)
+                health = await self.probe_vllm(self.vllm_base_url)
+                if health.status == BackendStatus.HEALTHY:
+                    logger.info("vLLM is now healthy (model=%s).", model)
+                    return health
+        except Exception as e:
+            logger.warning("Failed to start vLLM: %s", e)
+
+        return health
+
     def get_healthy_backends(self) -> List[str]:
         """Return names of backends with ``status=HEALTHY`` from the last probe."""
         return [
