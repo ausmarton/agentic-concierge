@@ -8,7 +8,7 @@ mod update;
 use config::launcher_config;
 use exec::exec_python_concierge;
 use setup::{ensure_environment, upgrade_package};
-use update::{apply_update, check_latest_release, is_newer};
+use update::{apply_update, check_latest_release, is_newer, UpdateCheckResult};
 
 /// Return true if `--self-update` appears anywhere in the CLI args.
 /// (No `clap` — keeps the binary small.)
@@ -23,20 +23,36 @@ fn main() -> anyhow::Result<()> {
     if self_update {
         // --self-update: always try GitHub regardless of skip_update.
         match check_latest_release(&config) {
-            Some(r) => {
+            UpdateCheckResult::Found(r) => {
                 apply_update(&config, &r)?;
                 upgrade_package(&config, &r.version)?;
                 eprintln!("[concierge] restart to use the updated version");
                 std::process::exit(0);
             }
-            None => {
-                eprintln!("[concierge] could not reach GitHub");
+            UpdateCheckResult::AlreadyUpToDate => {
+                eprintln!("[concierge] already at latest version (v{})", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
+            UpdateCheckResult::NoBinaryForPlatform { version } => {
+                eprintln!(
+                    "[concierge] v{} is available but no binary for this platform ({}-{})",
+                    version,
+                    std::env::consts::ARCH,
+                    std::env::consts::OS,
+                );
+                eprintln!("[concierge] the release build may still be in progress — try again shortly");
+                // Still upgrade the Python package even without a launcher binary
+                upgrade_package(&config, &version)?;
+                std::process::exit(0);
+            }
+            UpdateCheckResult::Unreachable => {
+                eprintln!("[concierge] could not reach GitHub — check your network connection");
                 std::process::exit(1);
             }
         }
     } else if !config.skip_update {
         // Passive check: advisory only — never blocks startup.
-        if let Some(r) = check_latest_release(&config) {
+        if let UpdateCheckResult::Found(r) = check_latest_release(&config) {
             if is_newer(&r) {
                 eprintln!(
                     "[concierge] update available: v{} \u{2014} run --self-update",

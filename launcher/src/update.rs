@@ -52,15 +52,28 @@ struct GitHubAsset {
     browser_download_url: String,
 }
 
-/// Check GitHub Releases API for the latest release.
-///
-/// Returns `None` on *any* failure — network errors are silently ignored so
-/// the launcher never fails due to an unavailable update server.
-pub fn check_latest_release(_config: &LauncherConfig) -> Option<ReleaseInfo> {
-    check_latest_release_inner().ok().flatten()
+/// Outcome of checking the GitHub Releases API.
+#[derive(Debug)]
+pub enum UpdateCheckResult {
+    /// Found a release with a binary for this platform.
+    Found(ReleaseInfo),
+    /// Reached GitHub but no binary asset for this platform/architecture.
+    NoBinaryForPlatform { version: String },
+    /// Already at (or ahead of) the latest version.
+    AlreadyUpToDate,
+    /// Could not reach GitHub or parse the response.
+    Unreachable,
 }
 
-fn check_latest_release_inner() -> anyhow::Result<Option<ReleaseInfo>> {
+/// Check GitHub Releases API for the latest release.
+pub fn check_latest_release(_config: &LauncherConfig) -> UpdateCheckResult {
+    match check_latest_release_inner() {
+        Ok(result) => result,
+        Err(_) => UpdateCheckResult::Unreachable,
+    }
+}
+
+fn check_latest_release_inner() -> anyhow::Result<UpdateCheckResult> {
     let client = reqwest::blocking::Client::builder()
         .user_agent(format!("concierge-launcher/{}", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(5))
@@ -71,19 +84,31 @@ fn check_latest_release_inner() -> anyhow::Result<Option<ReleaseInfo>> {
         .send()?;
 
     if !response.status().is_success() {
-        return Ok(None);
+        return Ok(UpdateCheckResult::Unreachable);
     }
 
     let release: GitHubRelease = response.json()?;
     let version = release.tag_name.trim_start_matches('v').to_string();
 
+    // Check if we're already up-to-date before looking for assets
+    let current = semver::Version::parse(env!("CARGO_PKG_VERSION")).ok();
+    let latest = semver::Version::parse(&version).ok();
+    if let (Some(c), Some(l)) = (&current, &latest) {
+        if l <= c {
+            return Ok(UpdateCheckResult::AlreadyUpToDate);
+        }
+    }
+
     let asset_name = format!("concierge-{}-{}", ARCH_STR, asset_target_suffix());
     let asset = release.assets.iter().find(|a| a.name == asset_name);
 
-    Ok(asset.map(|a| ReleaseInfo {
-        version,
-        download_url: a.browser_download_url.clone(),
-    }))
+    match asset {
+        Some(a) => Ok(UpdateCheckResult::Found(ReleaseInfo {
+            version,
+            download_url: a.browser_download_url.clone(),
+        })),
+        None => Ok(UpdateCheckResult::NoBinaryForPlatform { version }),
+    }
 }
 
 /// Verify Ed25519 signature of a binary using the embedded public key.
