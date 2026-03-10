@@ -25,6 +25,7 @@ pub fn ensure_environment(config: &LauncherConfig) -> anyhow::Result<PathBuf> {
     let concierge_bin = config.venv_dir.join("bin").join("concierge-py");
     if concierge_bin.exists() {
         ensure_extras(config)?;
+        ensure_package_version(config)?;
         return Ok(concierge_bin);
     }
 
@@ -156,6 +157,82 @@ fn ensure_extras(config: &LauncherConfig) -> anyhow::Result<()> {
 
     // Update marker so we don't re-install next time.
     std::fs::write(&config.extras_file, requested)?;
+    Ok(())
+}
+
+/// Ensure the installed Python package version matches the launcher version.
+///
+/// Compares the `version_file` (written during install/upgrade) against
+/// `CARGO_PKG_VERSION`. If they differ, runs `pip install --upgrade` to sync.
+/// This prevents launcher/Python package version skew after self-update,
+/// failed upgrades, or manual launcher binary replacement.
+///
+/// Skipped when the version file doesn't exist (first-time setup handles it).
+fn ensure_package_version(config: &LauncherConfig) -> anyhow::Result<()> {
+    let launcher_version = env!("CARGO_PKG_VERSION");
+
+    let installed = match std::fs::read_to_string(&config.version_file) {
+        Ok(v) => v.trim().to_string(),
+        Err(_) => {
+            // No version file yet — write current version and return.
+            // The package was installed by a previous setup; don't force a
+            // potentially slow upgrade just because the marker file is missing.
+            std::fs::create_dir_all(&config.data_dir)?;
+            std::fs::write(&config.version_file, launcher_version)?;
+            return Ok(());
+        }
+    };
+
+    if installed == launcher_version {
+        return Ok(()); // already in sync
+    }
+
+    eprintln!(
+        "[concierge] syncing package: v{} → v{}",
+        installed, launcher_version
+    );
+    let pip = config.venv_dir.join("bin").join("pip");
+    let package_spec = match &config.pypi_extra {
+        Some(extra) => format!("{}[{}]=={}", config.package_name, extra, launcher_version),
+        None => format!("{}=={}", config.package_name, launcher_version),
+    };
+    let output = std::process::Command::new(&pip)
+        .args(["install", "--upgrade", &package_spec])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            std::fs::write(&config.version_file, launcher_version)?;
+        }
+        Ok(_) => {
+            // Pinned version failed (not on PyPI yet?) — try unpinned.
+            let fallback_spec = match &config.pypi_extra {
+                Some(extra) => format!("{}[{}]", config.package_name, extra),
+                None => config.package_name.clone(),
+            };
+            let fallback = std::process::Command::new(&pip)
+                .args(["install", "--upgrade", &fallback_spec])
+                .output();
+            match fallback {
+                Ok(out) if out.status.success() => {
+                    std::fs::write(&config.version_file, launcher_version)?;
+                }
+                _ => {
+                    eprintln!(
+                        "[concierge] WARNING: could not sync package to v{} — continuing with v{}",
+                        launcher_version, installed
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "[concierge] WARNING: package sync failed ({}); continuing with v{}",
+                e, installed
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -427,6 +504,33 @@ mod tests {
         // Same extras already recorded → should return Ok without running pip
         let result = ensure_extras(&config);
         assert!(result.is_ok());
+    }
+
+    // ── ensure_package_version tests ───────────────────────────────────────────
+
+    #[test]
+    fn ensure_package_version_noop_when_in_sync() {
+        let dir = tempdir().unwrap();
+        let config = make_config(dir.path());
+        std::fs::create_dir_all(&config.data_dir).unwrap();
+        std::fs::write(&config.version_file, env!("CARGO_PKG_VERSION")).unwrap();
+        // Should return Ok without running pip
+        let result = ensure_package_version(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn ensure_package_version_creates_marker_when_missing() {
+        let dir = tempdir().unwrap();
+        let config = make_config(dir.path());
+        std::fs::create_dir_all(&config.data_dir).unwrap();
+        assert!(!config.version_file.exists());
+        // Should create the version file with current version
+        let result = ensure_package_version(&config);
+        assert!(result.is_ok());
+        assert!(config.version_file.exists());
+        let written = std::fs::read_to_string(&config.version_file).unwrap();
+        assert_eq!(written, env!("CARGO_PKG_VERSION"));
     }
 
     // ── extract_uv tests ──────────────────────────────────────────────────────

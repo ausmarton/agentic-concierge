@@ -31,6 +31,14 @@ fn main() -> anyhow::Result<()> {
             }
             UpdateCheckResult::AlreadyUpToDate => {
                 eprintln!("[concierge] already at latest version (v{})", env!("CARGO_PKG_VERSION"));
+                // Ensure the Python package is in sync even when the launcher
+                // binary is already current (recovers from failed prior upgrades).
+                let concierge_bin = config.venv_dir.join("bin").join("concierge-py");
+                if concierge_bin.exists() {
+                    if let Err(e) = ensure_environment(&config) {
+                        eprintln!("[concierge] WARNING: package sync failed: {}", e);
+                    }
+                }
                 std::process::exit(0);
             }
             UpdateCheckResult::NoBinaryForPlatform { version } => {
