@@ -9,6 +9,70 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+**V2: Three-Layer Architecture — Model Runtime, Recursive Task Decomposition, Agent-Model Affinity**
+
+**Layer 1: Model Runtime**
+- `infrastructure/backends/protocol.py`: `InferenceBackend` protocol, `ModelSlot`, `ModelHandle`,
+  `ModelInfo`, `RuntimeStatus` data structures for model lifecycle management.
+- `infrastructure/backends/ollama.py`: `OllamaBackend` — manages Ollama model lifecycle via
+  keep_alive API (load/unload, list loaded/available models).
+- `infrastructure/backends/llama_cpp.py`: `LlamaCppBackend` — managed llama.cpp server with
+  one process per model, dynamic port allocation, and process lifecycle management.
+- `infrastructure/backends/registry.py`: `BackendRegistry` — discovers and monitors inference
+  backends with health checks, priority-based failover, and `from_config()` factory loading
+  from `config/defaults/backends.yaml`.
+- `infrastructure/backends/model_runtime.py`: `LocalModelRuntime` — core model lifecycle with
+  `acquire(requirements) → ModelHandle`, `release(handle)`, reference counting, LRU eviction,
+  memory budget tracking, and `preload_hint()` for background loading.
+- `infrastructure/backends/capability_probe.py`: `CapabilityProbe` — validates model capabilities
+  via micro-prompt probes (tool_calling, structured_output, instruction_following) with disk-cached
+  results.
+- `config/defaults/backends.yaml`: Backend configuration with Ollama, vLLM, and llama_cpp
+  definitions and tier-priority mapping.
+- `config/external.py`: `load_yaml_config()` for loading bundled YAML configuration defaults.
+
+**Layer 2: Recursive Task Decomposition**
+- `application/task_graph.py`: `TaskGraph` and `TaskNode` — DAG-based recursive task decomposition
+  replacing flat `OrchestrationPlan`. State machine: pending → decomposing → critiqued → executing
+  → reviewing → done/failed. Methods: `from_root()`, `add_child()`, `ready_nodes()`, `transition()`,
+  `mark_done()`, `mark_failed()`, `_propagate_done()`.
+- `application/planner.py`: `plan_task()` — planner + critic loop with configurable `max_replans`
+  (default 2). `_call_planner()` decomposes tasks into subtasks with capability requirements.
+  `_call_critic()` reviews plans (fail-open on errors). `should_decompose()` implements adaptive
+  depth control.
+- `application/graph_executor.py`: `execute_graph()` — repeatedly finds ready leaf nodes, executes
+  them in parallel via `asyncio.gather`, marks done/failed, propagates completion upward. Safety
+  limit of 50 execution steps. Event callbacks for observability.
+
+**Layer 3: Agent-Model Affinity**
+- `application/agent_roles.py`: Six built-in agent roles (router, planner, critic, coder,
+  researcher, reviewer) with capability requirements as `Dict[str, float]`. `assign_model()`
+  acquires models using role requirements + `must_differ_from` constraints (fail-open when
+  no alternative available). `determine_role()` infers role from task capabilities.
+- `application/affinity_executor.py`: `execute_graph_with_affinity()` wraps graph executor
+  with automatic model assignment per node. Issues `preload_hint()` calls for upcoming sibling
+  nodes via fire-and-forget `asyncio.ensure_future`. `AffinityContext` tracks role→model map
+  and node assignments.
+- `application/ports.py`: `ModelRuntime` protocol added with `acquire()`, `release()`,
+  `preload_hint()`, `status()`.
+
+**System Diagnostics**
+- `application/doctor.py`: `run_diagnostics()` → `DiagnosticReport` with 6 checks:
+  `check_config_loadable()`, `check_backends_yaml()`, `check_memory_budget()`,
+  `check_backend_registry()`, `check_model_availability()`, `check_agent_roles()`.
+
+### Tests
+
+- 15 new V2 test files: `test_task_graph.py` (~51), `test_planner.py` (~31),
+  `test_graph_executor.py` (~17), `test_agent_roles.py` (~25), `test_affinity_executor.py` (~8),
+  `test_preload.py` (~9), `test_doctor.py` (~11), `test_backend_registry.py` (~20),
+  `test_ollama_backend.py` (~20), `test_llama_cpp_backend.py` (~15),
+  `test_local_model_runtime.py` (~40), `test_capability_probe.py` (~15),
+  `test_backends_yaml.py`, `test_backends_alignment.py`, `test_model_handle.py`.
+- Fast CI: **1377 pass** (was 875).
+
 ---
 
 ## [0.3.12] — 2026-03-04
@@ -413,7 +477,7 @@ Initial public release of agentic-concierge, covering Phases 1–8.
 - Release workflow: automated PyPI publish (OIDC trusted publishing) + Docker image to GHCR on version tags.
 - Dockerfile (multi-stage builder + slim runtime) and docker-compose.yml (Ollama + agentic-concierge + model-pull).
 
-[Unreleased]: https://github.com/ausmarton/agentic-concierge/compare/v0.3.10...HEAD
+[Unreleased]: https://github.com/ausmarton/agentic-concierge/compare/v0.3.12...HEAD
 [0.3.12]: https://github.com/ausmarton/agentic-concierge/compare/v0.3.11...v0.3.12
 [0.3.11]: https://github.com/ausmarton/agentic-concierge/compare/v0.3.10...v0.3.11
 [0.3.10]: https://github.com/ausmarton/agentic-concierge/compare/v0.3.9...v0.3.10

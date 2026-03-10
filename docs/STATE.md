@@ -2,8 +2,67 @@
 
 **Purpose:** Single source of truth for “where we are” so any human or agent can resume work across restarts and sessions.
 
-**Last updated:** 2026-03-09. Fast CI: **875 pass** (`make test`).
+**Last updated:** 2026-03-10. Fast CI: **1429 pass** (`make test`).
 Rust launcher: **22 tests pass** (`make test-rust`).
+Branch: `v2a-config-loader` (ahead of main; not yet merged).
+
+---
+
+## V2: Three-Layer Architecture — **complete + wired** (2026-03-10)
+
+Ground-up redesign implementing a three-layer model runtime, recursive task decomposition,
+and agent-model affinity. See [DESIGN_V2.md](DESIGN_V2.md) for full design rationale.
+
+**Integration wiring + V1 removal (2026-03-10):** V2 is the sole execution path.
+The flow is: `plan_task()` → `TaskGraph` → `execute_graph_with_affinity()` → `leaf_adapter`
+→ `_execute_pack_loop()`. All V1 code removed: `_run_task_force_parallel`,
+`_merge_parallel_payloads`, `_select_specialist_model`, `_get_brief`, `_get_assignment`.
+Key module: `application/leaf_adapter.py` (bridges graph executor to pack loop).
+
+**V2-native graph checkpointing (ADR-032, 2026-03-10):** Replaced V1 checkpoint/resume with
+graph-aware checkpointing. `graph_checkpoint.json` stores serialized `TaskGraph` state;
+`resume_execute_task()` resets in-flight nodes to pending, skips done nodes via `prior_results`.
+CLI: `concierge resume <run_id>`, `logs list` shows resumable markers.
+HTTP: `POST /runs/{run_id}/resume`, `GET /runs/resumable`.
+82 new tests across 4 test files.
+
+### Layer 1: Model Runtime (Issues #15–#20)
+
+| Issue | What | New files | Tests |
+|-------|------|-----------|-------|
+| #15 | `InferenceBackend` protocol: `ModelSlot`, `ModelHandle`, `ModelInfo`, `RuntimeStatus` | `infrastructure/backends/protocol.py` | — |
+| #16 | `OllamaBackend`: lifecycle API (load/unload via keep_alive, list_loaded, list_available) | `infrastructure/backends/ollama.py`, `tests/test_ollama_backend.py` | ~20 |
+| #17 | `LlamaCppBackend`: managed llama.cpp server, one process per model, dynamic ports | `infrastructure/backends/llama_cpp.py`, `tests/test_llama_cpp_backend.py` | ~15 |
+| #18 | `BackendRegistry`: discovery, health monitoring, priority-based failover | `infrastructure/backends/registry.py`, `tests/test_backend_registry.py` | ~20 |
+| #19 | `LocalModelRuntime`: acquire/release with refcounting, LRU eviction, memory budgets | `infrastructure/backends/model_runtime.py`, `tests/test_local_model_runtime.py` | ~40 |
+| #20 | `CapabilityProbe`: micro-prompt probes for tool_calling, structured_output; disk cache | `infrastructure/backends/capability_probe.py`, `tests/test_capability_probe.py` | ~15 |
+
+**Key design:**
+- `ModelRuntime` protocol in `application/ports.py`: `acquire(requirements) → ModelHandle`, `release(handle)`, `preload_hint(requirements)`, `status() → RuntimeStatus`
+- `BackendRegistry.from_config()` loads `config/defaults/backends.yaml`; registers Ollama and optionally LlamaCpp
+- Memory-aware: tracks loaded model sizes, respects system RAM budget, LRU eviction when full
+
+### Layer 2: Recursive Task Decomposition (Issues #21–#23)
+
+| Issue | What | New files | Tests |
+|-------|------|-----------|-------|
+| #21 | `TaskGraph` + `TaskNode`: DAG with state machine (pending → decomposing → critiqued → executing → done/failed) | `application/task_graph.py`, `tests/test_task_graph.py` | ~51 |
+| #22 | Planner + Critic agents: LLM-based decomposition with critique loop (max 2 re-plans) | `application/planner.py`, `tests/test_planner.py` | ~31 |
+| #23 | `execute_graph()`: runs ready leaves in parallel via `asyncio.gather`, propagates completion | `application/graph_executor.py`, `tests/test_graph_executor.py` | ~17 |
+
+### Layer 3: Agent-Model Affinity (Issues #24–#27)
+
+| Issue | What | New files | Tests |
+|-------|------|-----------|-------|
+| #24 | 6 agent roles (router, planner, critic, coder, researcher, reviewer) with capability requirements | `application/agent_roles.py`, `tests/test_agent_roles.py` | ~25 |
+| #25 | Affinity executor: wraps graph executor with automatic model assignment per node | `application/affinity_executor.py`, `tests/test_affinity_executor.py` | ~8 |
+| #26 | Model preloading: `preload_hint()` for background model loading; fire-and-forget via `asyncio.ensure_future` | `tests/test_preload.py` | ~9 |
+| #27 | `concierge doctor` diagnostics: 6 checks (config, backends, memory, registry, models, roles) | `application/doctor.py`, `tests/test_doctor.py` | ~11 |
+
+### Configuration
+
+- `config/defaults/backends.yaml`: Ollama, vLLM, llama_cpp backends with tier-priority mapping
+- `config/external.py`: `load_yaml_config()` for loading bundled YAML defaults
 
 ---
 
@@ -158,7 +217,13 @@ SERVER profile now includes Ollama as a fallback backend.
 
 ---
 
-## Current phase: **Phase 14 complete**
+## Current phase: **V2 Three-Layer Architecture complete** (supersedes Phase 14)
+
+V2 implementation complete. **1429 tests pass** (22 Rust). All V1 code removed; graph checkpointing (ADR-032) replaces V1 resume.
+
+---
+
+## Phase 14 complete (superseded by V2)
 
 ### Phase 14 checklist — **complete**
 
@@ -214,12 +279,19 @@ Phases 6, 7, and 8 are all **complete**. Phase 8 items (P8-1 through P8-4) are a
 - **P7-2:** GitHub MCP real integration test + `docs/MCP_INTEGRATIONS.md`; `github_search` + `enterprise_search` capabilities added.
 - **P7-3:** `enterprise_research` specialist — `cross_run_search` tool (queries run index), staleness/confidence system prompt, `enterprise_search` + `github_search` capabilities; in `DEFAULT_CONFIG`. 16 tests.
 - **P7-4:** Docs update — STATE.md, PLAN.md, VISION.md §7+§8, BACKLOG.md all updated.
-- **P8-1:** Parallel task force execution — `task_force_mode` on `ConciergeConfig`; `_run_task_force_parallel()` + `_merge_parallel_payloads()` in `execute_task.py`; 14 tests.
+- **P8-1:** Parallel task force execution — V2 graph executor (`execute_graph_with_affinity`) handles parallel leaf execution natively; 7 tests.
 - **P8-2:** SSE run event streaming — `event_queue: Optional[asyncio.Queue]` on `execute_task()`; `_emit()` helper; `POST /run/stream` SSE endpoint; `run_complete` runlog event; 6 tests.
 - **P8-3:** Run status endpoint — `GET /runs/{run_id}/status`; reads `run_complete` event for completion detection; 6 tests.
 - **P8-4:** Docs update — STATE.md, BACKLOG.md, PLAN.md updated.
 
 ---
+
+## Legacy phase checklists (historical)
+
+> **Note:** These checklists record what was delivered in each phase. Some referenced files
+> (e.g. `engineering.py`, `research.py`, `recruit.py`, `capabilities.py`) have since been
+> replaced by the dynamic pack system (`dynamic_pack.py`, `tool_catalog.py`) and V2 architecture.
+> File paths are as they were at phase completion, not current.
 
 ## Phase 1 checklist (from [PLAN.md](PLAN.md))
 
@@ -386,19 +458,21 @@ All Phase 1 functional requirements (FR1–FR6 in REQUIREMENTS.md) have automate
 | P12-8 | `orchestration_plan` runlog event | Done | Emitted after recruitment when `routing_method=”orchestrator”` |
 | P12-9 | Orchestrator wired into `execute_task.py` | Done | `orchestrate_task` replaces `llm_recruit_specialist` call; `plan.mode` overrides `task_force_mode` |
 | P12-10 | `concierge plan` CLI command | Done | Calls `orchestrate_task`, prints Rich panel with mode/synthesis/assignments |
-| P12-11 | `infrastructure/workspace/run_checkpoint.py` | Done | `RunCheckpoint`; `save_checkpoint()` atomic; `load_checkpoint()`; `delete_checkpoint()`; `find_resumable_runs()` |
-| P12-12 | Checkpoint write/delete in `execute_task.py` | Done | `_create_initial_checkpoint()`, `_update_checkpoint()`, `_delete_run_checkpoint()`; `resume_execute_task()` |
+| P12-11 | Graph checkpoint (V2-native) | Done | `application/graph_checkpoint.py` (serialization); `infrastructure/workspace/graph_checkpoint.py` (atomic I/O); `GraphCheckpoint`; `save_checkpoint()`; `find_resumable_runs()` — **replaced V1 `run_checkpoint.py`** |
+| P12-12 | Checkpoint write/delete in `execute_task.py` | Done | `_create_graph_checkpoint()`, `_update_graph_checkpoint()`, `_delete_graph_checkpoint()`; `resume_execute_task()` |
 | P12-13 | `concierge resume` + `(resumable)` in `logs list` | Done | `resume_cmd` CLI command; resumable marker in `concierge logs list` |
-| P12-14 | Tests | Done | `test_run_tests_tool.py` (15), `test_engineering_pack_quality.py` (5), `test_orchestrate_task.py` (20), `test_run_checkpoint.py` (16), `test_resume.py` (8), +4 `test_execute_task.py`; total **599 pass** |
+| P12-14 | Tests | Done | `test_graph_checkpoint_serialization.py` (36), `test_graph_checkpoint_io.py` (28), `test_resume_execute_task.py` (13), `test_orchestrate_task.py` (20), `test_engineering_pack_quality.py` (5), `test_run_tests_tool.py` (15); total **1429 pass** |
 
 ## Next steps (what to do when resuming)
 
 **The backlog is the canonical source for what to work on next.**
 
 1. Read [BACKLOG.md](BACKLOG.md) — find the first non-done item; that is what to work on.
-2. Run `pytest tests/ -k “not real_llm and not verify and not real_mcp”` — confirm **875 pass** before touching code.
-3. Phase 12 is complete — see BACKLOG.md for Phase 13 planning or add new items.
-4. See [DECISIONS.md](DECISIONS.md) for rationale behind key architectural choices.
+2. Run `make test` — confirm **1429 pass** before touching code.
+3. Run `make test-rust` — confirm **22 pass**.
+4. V2 is complete on `v2a-config-loader` — merge to main and release when ready.
+5. See [DECISIONS.md](DECISIONS.md) for rationale behind key architectural choices.
+6. See [DESIGN_V2.md](DESIGN_V2.md) for V2 architecture design.
 
 ---
 

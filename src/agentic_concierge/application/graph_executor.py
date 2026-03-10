@@ -61,6 +61,7 @@ async def execute_graph(
     *,
     max_steps: int = MAX_EXECUTION_STEPS,
     on_event: Optional[EventCallback] = None,
+    prior_results: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> ExecutionResult:
     """Execute a task graph by running ready leaves until completion.
 
@@ -74,11 +75,16 @@ async def execute_graph(
         execute_leaf: Async callback ``(node, graph) -> result_dict``.
         max_steps: Safety limit on total leaf executions.
         on_event: Optional callback for execution events.
+        prior_results: Pre-populated results from a previous (checkpointed)
+            execution.  These are included in the returned ``results`` dict
+            but the corresponding nodes are NOT re-executed (they should
+            already be marked ``done`` in the graph by
+            ``prepare_graph_for_resume``).
 
     Returns:
         ExecutionResult with the final graph state and collected results.
     """
-    results: Dict[str, Dict[str, Any]] = {}
+    results: Dict[str, Dict[str, Any]] = dict(prior_results or {})
     failures: Dict[str, str] = {}
     steps = 0
 

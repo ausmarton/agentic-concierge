@@ -128,6 +128,20 @@ We can start with a small set of very specialised pillars (e.g. engineering + re
   - Human approval mechanism (ADR-021): `request_approval` tool handled inline in `_execute_pack_loop`; blocks on `ApprovalChannel` protocol. Three implementations (Auto, CLI, HTTP). CLI `--auto-approve`; HTTP `POST /runs/{run_id}/approve`; `approval_timeout_s` config.
   - Agent-to-agent delegation (ADR-022): `delegate_to_specialist` tool spawns nested `_execute_pack_loop`. Max depth 1, step budget 15.
 
+- **Specialist Marketplace (complete):**
+  - Model Capability Registry (ADR-023): scored profiles per model family, `match_models()`.
+  - Per-specialist model selection (ADR-024): task-capability matching for model choice.
+  - Non-tool-calling execution path (ADR-025): `consult_specialist_model` tool.
+  - Adaptive finish schemas (ADR-026): quick_answer, research_report, code, general.
+  - Independent reviewer model (ADR-027): reviewer uses different model than doer.
+  - Capability-driven orchestrator (ADR-028): route by capabilities, not template names.
+
+- **V2: Three-Layer Architecture (complete):**
+  - Layer 1 — Model Runtime: `LocalModelRuntime` with acquire/release, refcounting, LRU eviction; `BackendRegistry` with Ollama + LlamaCpp backends; `CapabilityProbe` micro-prompt validation.
+  - Layer 2 — Recursive Task Decomposition: `TaskGraph` DAG replacing flat orchestration; planner + critic agents with re-plan loop; `execute_graph()` with parallel leaf execution.
+  - Layer 3 — Agent-Model Affinity: 6 agent roles with capability requirements; `assign_model()` with `must_differ_from` constraints; `execute_graph_with_affinity()` for per-node model assignment; model preloading hints.
+  - ADR-029: Model Runtime, ADR-030: Recursive Task Decomposition, ADR-031: Agent-Model Affinity.
+
 - **Future:**
   - Dynamic re-recruitment: re-plan when a pack's output reveals additional capability needs.
   - Phase 15: Windows launcher + Homebrew tap.

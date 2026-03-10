@@ -9,8 +9,8 @@ informed by everything learned building v1 (Phases 1–14 + Specialist Marketpla
 
 **Target OS (priority order):** Fedora Linux > macOS > Windows
 
-**Status:** DRAFT — under active development
-**Last verified:** 2026-03-09 (all claims checked against latest releases)
+**Status:** IMPLEMENTED — Layer 1 (Model Runtime), Layer 2 (Task Decomposition), Layer 3 (Agent-Model Affinity) all implemented and tested on branch `v2a-config-loader`
+**Last verified:** 2026-03-10 — **1429 Python tests pass**, 22 Rust tests pass
 
 ---
 

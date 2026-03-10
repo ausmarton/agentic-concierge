@@ -1,4 +1,4 @@
-"""Tests for the Phase 12 orchestrator: orchestrate_task(), OrchestrationPlan, _get_brief.
+"""Tests for the orchestrator: orchestrate_task(), OrchestrationPlan.
 
 All tests use AsyncMock to avoid real LLM calls.  They verify:
 - Valid create_plan response → OrchestrationPlan with routing_method='orchestrator'.
@@ -7,7 +7,6 @@ All tests use AsyncMock to avoid real LLM calls.  They verify:
 - Fallback on no tool call / wrong tool / exception.
 - Unknown specialist IDs filtered.
 - No valid assignments after filtering → fallback.
-- _get_brief helper (tested via execute_task._get_brief).
 - required_capabilities derived from specialist configs.
 """
 from __future__ import annotations
@@ -21,7 +20,6 @@ from agentic_concierge.application.orchestrator import (
     SpecialistBrief,
     orchestrate_task,
 )
-from agentic_concierge.application.execute_task import _get_brief
 from agentic_concierge.config import DEFAULT_CONFIG, ConciergeConfig
 from agentic_concierge.config.schema import ModelConfig, SpecialistConfig
 from agentic_concierge.domain import LLMResponse, ToolCallRequest
@@ -269,51 +267,3 @@ async def test_orchestrate_fallback_on_exception():
 
     assert len(plan.specialist_assignments) >= 1
     assert plan.routing_method == "template_fallback"
-
-
-# ---------------------------------------------------------------------------
-# _get_brief helper
-# ---------------------------------------------------------------------------
-
-def test_get_brief_returns_brief_for_known_specialist():
-    plan = OrchestrationPlan(
-        specialist_assignments=[
-            SpecialistBrief("engineering", "implement the API"),
-            SpecialistBrief("research", "survey literature"),
-        ],
-        mode="sequential",
-        synthesis_required=True,
-        reasoning="test",
-        routing_method="orchestrator",
-        required_capabilities=[],
-    )
-    assert _get_brief(plan, "engineering") == "implement the API"
-    assert _get_brief(plan, "research") == "survey literature"
-
-
-def test_get_brief_returns_empty_for_unknown_specialist():
-    plan = OrchestrationPlan(
-        specialist_assignments=[SpecialistBrief("engineering", "do stuff")],
-        mode="sequential",
-        synthesis_required=False,
-        reasoning="",
-        routing_method="orchestrator",
-        required_capabilities=[],
-    )
-    assert _get_brief(plan, "research") == ""
-
-
-def test_get_brief_returns_empty_for_none_plan():
-    assert _get_brief(None, "engineering") == ""
-
-
-def test_get_brief_returns_empty_string_for_empty_brief():
-    plan = OrchestrationPlan(
-        specialist_assignments=[SpecialistBrief("engineering", "")],
-        mode="sequential",
-        synthesis_required=False,
-        reasoning="",
-        routing_method="orchestrator",
-        required_capabilities=[],
-    )
-    assert _get_brief(plan, "engineering") == ""

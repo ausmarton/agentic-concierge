@@ -13,7 +13,7 @@ import typer
 from rich import print as rprint
 from rich.panel import Panel
 
-from agentic_concierge.application.execute_task import execute_task
+from agentic_concierge.application.execute_task import execute_task, resume_execute_task
 from agentic_concierge.config import load_config
 from agentic_concierge.domain import Task, build_task
 from agentic_concierge.infrastructure.chat import build_chat_client
@@ -332,8 +332,9 @@ def logs_list(
         rprint(f"[dim]No runs found in {workspace}/runs/[/dim]")
         return
 
-    from agentic_concierge.infrastructure.workspace.run_checkpoint import find_resumable_runs
-    resumable_ids = set(find_resumable_runs(workspace))
+    # Build a set of resumable run IDs
+    from agentic_concierge.infrastructure.workspace.graph_checkpoint import find_resumable_runs
+    resumable_ids = {r.run_id for r in find_resumable_runs(workspace)}
 
     from rich.table import Table
     table = Table(title=f"Recent runs ({workspace})", show_header=True, header_style="bold")
@@ -341,6 +342,7 @@ def logs_list(
     table.add_column("Started", style="dim")
     table.add_column("Specialists", style="green")
     table.add_column("Events", justify="right")
+    table.add_column("Status")
     table.add_column("Summary", overflow="fold")
 
     for s in summaries:
@@ -351,10 +353,8 @@ def logs_list(
         )
         specialists = ", ".join(s.specialist_ids) if s.specialist_ids else (s.specialist_id or "—")
         summary = (s.payload_summary or "")[:80]
-        run_id_display = s.run_id
-        if s.run_id in resumable_ids:
-            run_id_display = f"{s.run_id} [dim](resumable)[/dim]"
-        table.add_row(run_id_display, started, specialists, str(s.event_count), summary)
+        status = "[yellow]resumable[/yellow]" if s.run_id in resumable_ids else "[green]done[/green]"
+        table.add_row(s.run_id, started, specialists, str(s.event_count), status, summary)
 
     from rich.console import Console
     Console().print(table)
@@ -565,91 +565,6 @@ def plan_cmd(
     ))
 
 
-@app.command("resume")
-def resume_cmd(
-    run_id_arg: str = typer.Argument(..., help="Run ID to resume.", metavar="RUN_ID"),
-    workspace: str = typer.Option(
-        ".concierge", "--workspace", "-w", help="Workspace root (default: .concierge)."
-    ),
-    model_key: str = typer.Option("quality", help="Model profile."),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose logging."),
-) -> None:
-    """Resume an interrupted run from its checkpoint."""
-    logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.WARNING,
-        format="%(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,
-    )
-    from pathlib import Path
-    from agentic_concierge.infrastructure.workspace.run_checkpoint import load_checkpoint
-    from agentic_concierge.application.execute_task import resume_execute_task
-
-    run_dir = str(Path(workspace) / "runs" / run_id_arg)
-    checkpoint = load_checkpoint(run_dir)
-
-    if checkpoint is None:
-        rprint(f"[red]No checkpoint found for run {run_id_arg!r} in {workspace}.[/red]")
-        sys.exit(1)
-
-    completed = checkpoint.completed_specialists
-    total = checkpoint.specialist_ids
-    remaining = [s for s in total if s not in completed]
-
-    if not remaining:
-        rprint(f"[yellow]Run {run_id_arg!r} is already complete (all specialists finished).[/yellow]")
-        sys.exit(0)
-
-    rprint(
-        f"[cyan]Resuming run {run_id_arg}[/cyan] — "
-        f"{len(completed)}/{len(total)} specialists complete, "
-        f"continuing from [bold]{remaining[0]}[/bold]..."
-    )
-
-    config = load_config()
-    setup_telemetry(config)
-    try:
-        resolved = resolve_llm(config, checkpoint.model_key)
-    except RuntimeError as e:
-        rprint(f"[red]{e}[/red]")
-        sys.exit(1)
-
-    for w in resolved.warnings:
-        rprint(f"[yellow]Warning: {w}[/yellow]")
-
-    chat_client = build_chat_client(resolved.model_config)
-    run_repository = FileSystemRunRepository(workspace_root=workspace)
-    specialist_registry = ConfigSpecialistRegistry(config)
-    specialist_registry.set_runtime_models(resolved.all_chat_models)
-
-    try:
-        result = asyncio.run(
-            resume_execute_task(
-                run_id_arg,
-                workspace,
-                chat_client=chat_client,
-                run_repository=run_repository,
-                specialist_registry=specialist_registry,
-                config=config,
-                resolved_model_cfg=resolved.model_config,
-                resolved_llm=resolved,
-                max_steps=40,
-            )
-        )
-    except ValueError as e:
-        rprint(f"[red]{e}[/red]")
-        sys.exit(1)
-
-    rprint(
-        Panel.fit(
-            f"[bold]Pack:[/bold] {result.specialist_id}\n"
-            f"[bold]Run dir:[/bold] {result.run_dir}\n"
-            f"[bold]Workspace:[/bold] {result.workspace_path}\n"
-            f"[bold]Model:[/bold] {result.model_name}"
-        )
-    )
-    rprint(json.dumps(result.payload, indent=2, ensure_ascii=False))
-
-
 @app.command("bootstrap")
 def bootstrap_cmd(
     profile: str = typer.Option(
@@ -673,6 +588,99 @@ def bootstrap_cmd(
     except ValueError as e:
         rprint(f"[red]{e}[/red]")
         sys.exit(1)
+
+
+@app.command("resume")
+def resume_cmd(
+    run_id: str = typer.Argument(..., help="Run ID to resume."),
+    workspace: str = typer.Option(
+        "", "--workspace", "-w", help="Workspace root (default: auto-detect from env).",
+    ),
+    model_key: str = typer.Option("quality", help="Which model profile to use (quality|fast)."),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose (DEBUG) logging to stderr."),
+    auto_approve: bool = typer.Option(False, "--auto-approve", help="Auto-approve all approval requests."),
+) -> None:
+    """Resume a previously interrupted run from its checkpoint."""
+    from pathlib import Path
+
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.WARNING,
+        format="%(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
+    config = load_config()
+    setup_telemetry(config)
+    try:
+        resolved = resolve_llm(config, model_key)
+    except RuntimeError as e:
+        rprint(f"[red]{e}[/red]")
+        sys.exit(1)
+
+    for w in resolved.warnings:
+        rprint(f"[yellow]Warning: {w}[/yellow]")
+    rprint(f"[dim]Using model: {resolved.model} at {resolved.base_url}[/dim]")
+
+    ws_root = workspace or _workspace_root()
+    run_dir = str(Path(ws_root).resolve() / "runs" / run_id)
+    if not Path(run_dir).exists():
+        rprint(f"[red]Run directory not found: {run_dir}[/red]")
+        sys.exit(1)
+
+    from agentic_concierge.infrastructure.workspace.graph_checkpoint import load_checkpoint
+    ckpt = load_checkpoint(run_dir)
+    if ckpt is None:
+        rprint(f"[red]No checkpoint found for run {run_id}. Only interrupted runs can be resumed.[/red]")
+        sys.exit(1)
+
+    rprint(f"[dim]Resuming run {run_id}...[/dim]")
+    rprint(f"[dim]Original prompt: {ckpt.prompt[:100]}[/dim]")
+
+    chat_client = build_chat_client(resolved.model_config)
+    run_repository = FileSystemRunRepository(workspace_root=ws_root)
+    specialist_registry = ConfigSpecialistRegistry(config)
+    specialist_registry.set_runtime_models(resolved.all_chat_models)
+
+    if auto_approve:
+        from agentic_concierge.infrastructure.approval import AutoApprovalChannel
+        approval_channel = AutoApprovalChannel()
+    else:
+        from agentic_concierge.infrastructure.approval import CliApprovalChannel
+        approval_channel = CliApprovalChannel(
+            timeout_s=getattr(config, "approval_timeout_s", 600.0),
+        )
+
+    from agentic_concierge.domain import RunId as _RunId
+    try:
+        result = asyncio.run(
+            resume_execute_task(
+                _RunId(run_id),
+                run_dir,
+                chat_client=chat_client,
+                run_repository=run_repository,
+                specialist_registry=specialist_registry,
+                config=config,
+                resolved_model_cfg=resolved.model_config,
+                resolved_llm=resolved,
+                max_steps=40,
+                approval_channel=approval_channel,
+            )
+        )
+    except ValueError as e:
+        rprint(f"[red]{e}[/red]")
+        sys.exit(1)
+    except httpx.ConnectError as e:
+        rprint(f"[red]LLM server unreachable: {e}[/red]")
+        sys.exit(1)
+
+    rprint(
+        Panel.fit(
+            f"[bold]Resumed run:[/bold] {result.run_id.value}\n"
+            f"[bold]Pack:[/bold] {result.specialist_id}\n"
+            f"[bold]Run dir:[/bold] {result.run_dir}\n"
+            f"[bold]Model:[/bold] {result.model_name}"
+        )
+    )
+    rprint(json.dumps(result.payload, indent=2, ensure_ascii=False))
 
 
 @logs_app.command("search")

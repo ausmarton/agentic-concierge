@@ -405,3 +405,51 @@ class TestResultsCollection:
 
         assert "a" in result.failures
         assert len(result.results) == 0
+
+
+# ---------------------------------------------------------------------------
+# Resume with prior_results
+# ---------------------------------------------------------------------------
+
+
+class TestPriorResults:
+
+    @pytest.mark.asyncio
+    async def test_prior_results_included_in_output(self):
+        """prior_results appear in the returned results without re-execution."""
+        g = TaskGraph.from_root("Root", node_id="r")
+        g.add_child("r", "A", node_id="a")
+        g.add_child("r", "B", node_id="b")
+        g.transition("r", "decomposing")
+        g.transition("r", "critiqued")
+
+        # Mark 'a' as done (simulating a resumed graph)
+        g.transition("a", "executing")
+        g.mark_done("a", {"answer": "A-prior"})
+
+        order: List[str] = []
+        result = await execute_graph(
+            g, _counting_executor(order),
+            prior_results={"a": {"answer": "A-prior"}},
+        )
+
+        assert result.completed is True
+        # 'a' was already done — should not be re-executed
+        assert "a" not in order
+        # 'b' was pending and executed
+        assert "b" in order
+        # Both results should be in the output
+        assert result.results["a"] == {"answer": "A-prior"}
+        assert "b" in result.results
+
+    @pytest.mark.asyncio
+    async def test_prior_results_none_is_empty(self):
+        """prior_results=None behaves like prior_results={}."""
+        g = TaskGraph.from_root("Root", node_id="r")
+        g.add_child("r", "T", node_id="t")
+        g.transition("r", "decomposing")
+        g.transition("r", "critiqued")
+
+        result = await execute_graph(g, _ok_executor, prior_results=None)
+        assert result.completed is True
+        assert "t" in result.results

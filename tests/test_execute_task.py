@@ -702,24 +702,34 @@ async def test_loop_warning_injected_as_user_message(tmp_path):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_orchestrator_brief_injected_into_specialist_messages(tmp_path):
-    """When orchestrate_task returns a brief, it appears in the first user message sent to the specialist LLM.
-
-    We verify this by checking the runlog llm_request event's message content.
+async def test_planner_subtask_description_injected_into_specialist_messages(tmp_path):
+    """When plan_task decomposes into subtasks, the subtask description appears in the
+    specialist's first user message.  V2 replacement for orchestrator brief injection.
     """
-    from agentic_concierge.application.orchestrator import OrchestrationPlan, SpecialistBrief
+    from agentic_concierge.application.planner import PlanResult
+    from agentic_concierge.application.task_graph import TaskGraph
 
     config = load_config()
     run_repository = FileSystemRunRepository(workspace_root=str(tmp_path))
     specialist_registry = ConfigSpecialistRegistry(config)
 
-    plan_with_brief = OrchestrationPlan(
-        specialist_assignments=[SpecialistBrief("engineering", "Implement auth using JWT")],
-        mode="sequential",
-        synthesis_required=False,
+    # Create a TaskGraph with a specific subtask description
+    graph = TaskGraph.from_root("build auth")
+    graph.add_child(
+        graph.root_id, "Implement auth using JWT",
+        required_capabilities=["code_python"],
+        finish_schema_key="code",
+    )
+    graph.transition(graph.root_id, "decomposing")
+    graph.transition(graph.root_id, "critiqued")
+
+    plan_result = PlanResult(
+        graph=graph,
         reasoning="test brief injection",
-        routing_method="orchestrator",
-        required_capabilities=["code_execution"],
+        critique_feedback=None,
+        replan_count=0,
+        planner_model="test-model",
+        critic_model="test-model",
     )
 
     captured_messages = []
@@ -735,9 +745,9 @@ async def test_orchestrator_brief_injected_into_specialist_messages(tmp_path):
         return _finish_response()
 
     with patch(
-        "agentic_concierge.application.execute_task.orchestrate_task",
+        "agentic_concierge.application.planner.plan_task",
         new_callable=AsyncMock,
-        return_value=plan_with_brief,
+        return_value=plan_result,
     ), patch.object(OllamaChatClient, "chat", side_effect=mock_chat):
         chat_client = OllamaChatClient(base_url="http://localhost:11434/v1", timeout_s=5.0)
         task = Task(prompt="build auth", specialist_id=None, network_allowed=False)
@@ -751,13 +761,13 @@ async def test_orchestrator_brief_injected_into_specialist_messages(tmp_path):
             max_review_iterations=0,
         )
 
-    # The first chat call's user message should contain the brief
+    # The pack loop's first chat call should contain the subtask description
     assert len(captured_messages) >= 1
     first_user_msg = next(
         (m["content"] for m in captured_messages[0] if m["role"] == "user"), ""
     )
     assert "Implement auth using JWT" in first_user_msg, (
-        f"Brief not found in user message: {first_user_msg!r}"
+        f"Subtask description not found in user message: {first_user_msg!r}"
     )
 
 
@@ -830,21 +840,29 @@ async def test_quality_gate_rejects_false_tests_verified(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_synthesis_skipped_for_single_specialist(tmp_path):
-    """Synthesis step is not attempted when there is only one specialist (synthesis_required=False)."""
-    from agentic_concierge.application.orchestrator import OrchestrationPlan, SpecialistBrief
+async def test_single_node_graph_no_extra_overhead(tmp_path):
+    """V2: single-leaf task graph completes with just the pack loop calls (no synthesis)."""
+    from agentic_concierge.application.planner import PlanResult
+    from agentic_concierge.application.task_graph import TaskGraph
 
     config = load_config()
     run_repository = FileSystemRunRepository(workspace_root=str(tmp_path))
     specialist_registry = ConfigSpecialistRegistry(config)
 
-    plan_no_synthesis = OrchestrationPlan(
-        specialist_assignments=[SpecialistBrief("engineering", "")],
-        mode="sequential",
-        synthesis_required=False,  # single specialist → no synthesis
-        reasoning="",
-        routing_method="orchestrator",
-        required_capabilities=[],
+    # Build a single-leaf graph (planner produces one subtask)
+    graph = TaskGraph.from_root("build", node_id="root")
+    graph.add_child(
+        "root", "Build the thing",
+        node_id="leaf1",
+        required_capabilities=["code_python"],
+    )
+    plan_result = PlanResult(
+        graph=graph,
+        reasoning="Single subtask",
+        critique_feedback=None,
+        replan_count=0,
+        planner_model="test-model",
+        critic_model="test-model",
     )
 
     call_count = {"n": 0}
@@ -859,9 +877,9 @@ async def test_synthesis_skipped_for_single_specialist(tmp_path):
         return _finish_response()
 
     with patch(
-        "agentic_concierge.application.execute_task.orchestrate_task",
+        "agentic_concierge.application.planner.plan_task",
         new_callable=AsyncMock,
-        return_value=plan_no_synthesis,
+        return_value=plan_result,
     ), patch.object(OllamaChatClient, "chat", side_effect=mock_chat):
         chat_client = OllamaChatClient(base_url="http://localhost:11434/v1", timeout_s=5.0)
         task = Task(prompt="build", specialist_id=None, network_allowed=False)
@@ -875,7 +893,7 @@ async def test_synthesis_skipped_for_single_specialist(tmp_path):
             max_review_iterations=0,
         )
 
-    # Only 2 chat calls (list_files + finish_task); no synthesis call (which would be call_count=3)
+    # Only 2 chat calls (list_files + finish_task); no synthesis overhead
     assert call_count["n"] == 2, (
         f"Expected 2 chat calls (no synthesis), got {call_count['n']}"
     )

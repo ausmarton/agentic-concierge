@@ -10,7 +10,6 @@ All tests use mocks so no Ollama / venv / filesystem I/O is needed.
 """
 from __future__ import annotations
 
-import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from typer.testing import CliRunner
@@ -45,28 +44,6 @@ def _mock_run_result(specialist_id="engineering", payload=None):
     m.model_name = "llama3.1:8b"
     m.payload = payload or {"result": "done"}
     return m
-
-
-def _make_checkpoint(tmp_path, run_id, completed=None):
-    """Build a RunCheckpoint with sane defaults."""
-    from agentic_concierge.infrastructure.workspace.run_checkpoint import RunCheckpoint
-    now = time.time()
-    return RunCheckpoint(
-        run_id=run_id,
-        run_dir=str(tmp_path / "runs" / run_id),
-        workspace_path=str(tmp_path / "runs" / run_id / "workspace"),
-        task_prompt="test task",
-        specialist_ids=["engineering"],
-        completed_specialists=completed if completed is not None else [],
-        payloads={},
-        task_force_mode="sequential",
-        model_key="quality",
-        routing_method="orchestrator",
-        required_capabilities=[],
-        orchestration_plan=None,
-        created_at=now,
-        updated_at=now,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -251,64 +228,27 @@ def test_plan_shows_synthesis_flag():
 def test_resume_help():
     result = runner.invoke(app, ["resume", "--help"])
     assert result.exit_code == 0
+    assert "run-id" in result.output.lower() or "run_id" in result.output.lower()
 
 
-def test_resume_no_checkpoint(tmp_path):
-    """A missing checkpoint must exit with a non-zero code and an error message."""
+def test_resume_exits_on_no_llm():
+    """When resolve_llm raises RuntimeError the CLI must exit non-zero."""
     with patch(
-        "agentic_concierge.infrastructure.workspace.run_checkpoint.load_checkpoint",
-        return_value=None,
+        "agentic_concierge.interfaces.cli.resolve_llm",
+        side_effect=RuntimeError("No LLM available"),
     ):
-        result = runner.invoke(app, ["resume", "no-such-run", "--workspace", str(tmp_path)])
+        result = runner.invoke(app, ["resume", "test-run-id"])
     assert result.exit_code != 0
 
 
-def test_resume_all_complete(tmp_path):
-    """When all specialists are done the CLI must report success (exit 0)."""
-    checkpoint = _make_checkpoint(tmp_path, "run-done", completed=["engineering"])
+def test_resume_exits_on_missing_run_dir(tmp_path):
+    """When the run dir doesn't exist, the CLI must exit non-zero."""
     with patch(
-        "agentic_concierge.infrastructure.workspace.run_checkpoint.load_checkpoint",
-        return_value=checkpoint,
+        "agentic_concierge.interfaces.cli.resolve_llm",
+        return_value=_mock_resolved(),
     ):
-        result = runner.invoke(app, ["resume", "run-done", "--workspace", str(tmp_path)])
-    assert result.exit_code == 0
-    assert "already complete" in result.output.lower()
-
-
-def test_resume_prints_remaining_specialist(tmp_path):
-    """Before executing, resume must print the specialist it is continuing from."""
-    checkpoint = _make_checkpoint(tmp_path, "run-partial", completed=[])
-    mock_result = _mock_run_result()
-    with (
-        patch(
-            "agentic_concierge.infrastructure.workspace.run_checkpoint.load_checkpoint",
-            return_value=checkpoint,
-        ),
-        patch("agentic_concierge.interfaces.cli.resolve_llm", return_value=_mock_resolved()),
-        patch("agentic_concierge.interfaces.cli.build_chat_client", return_value=MagicMock()),
-        patch(
-            "agentic_concierge.application.execute_task.resume_execute_task",
-            new_callable=AsyncMock,
-            return_value=mock_result,
-        ),
-    ):
-        result = runner.invoke(app, ["resume", "run-partial", "--workspace", str(tmp_path)])
-    assert result.exit_code == 0
-    assert "engineering" in result.output
-
-
-def test_resume_exits_on_no_llm(tmp_path):
-    """If resolve_llm fails during resume, the CLI must exit non-zero."""
-    checkpoint = _make_checkpoint(tmp_path, "run-partial", completed=[])
-    with (
-        patch(
-            "agentic_concierge.infrastructure.workspace.run_checkpoint.load_checkpoint",
-            return_value=checkpoint,
-        ),
-        patch(
-            "agentic_concierge.interfaces.cli.resolve_llm",
-            side_effect=RuntimeError("No LLM"),
-        ),
-    ):
-        result = runner.invoke(app, ["resume", "run-partial", "--workspace", str(tmp_path)])
+        result = runner.invoke(app, [
+            "resume", "nonexistent-run", "--workspace", str(tmp_path),
+        ])
     assert result.exit_code != 0
+    assert "not found" in result.output.lower()

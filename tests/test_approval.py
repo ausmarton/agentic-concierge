@@ -398,41 +398,46 @@ async def test_http_channel_resolve():
 
 @pytest.mark.asyncio
 async def test_approval_in_parallel_mode():
-    """Approval channel works when passed through parallel task force."""
-    # This is a unit test: just verify the parameter threading works.
-    from agentic_concierge.application.execute_task import _run_task_force_parallel
-    from agentic_concierge.domain import Task, build_task
+    """Approval channel is threaded through V2 LeafExecutionContext to pack loop."""
+    from agentic_concierge.application.leaf_adapter import LeafExecutionContext, build_leaf_executor
 
-    task = build_task("deploy", "", "quality", True)
-    responses = [
-        LLMResponse(content=None, tool_calls=[_tool_call("shell", {"command": "echo"})]),
-        LLMResponse(content=None, tool_calls=[_tool_call("finish_task", {"summary": "ok"}, call_id="c2")]),
-    ]
-    pack = _Pack([_shell_tool_def(), _finish_tool_def()])
-
-    class _Registry:
-        def get_pack(self, sid, wp, na, **kw):
-            return pack
-        def list_ids(self):
-            return ["engineering"]
-
-    client = _make_chat_client(responses)
-    result = await _run_task_force_parallel(
-        specialist_ids=["engineering"],
-        task=task,
-        workspace_path="/tmp/test",
-        model_cfg=_model_cfg(),
-        chat_client=client,
+    channel = AutoApprovalChannel()
+    mock_loop = AsyncMock(return_value={"summary": "ok", "action": "final"})
+    ctx = LeafExecutionContext(
+        specialist_registry=MagicMock(get_pack=MagicMock(return_value=_Pack([_finish_tool_def()]))),
         run_repository=_run_repo(),
         run_id=RunId(value="test-run"),
+        workspace_path="/tmp/test",
+        config=MagicMock(models={"quality": _model_cfg()}),
+        network_allowed=True,
         max_steps=10,
-        tracer=None,
-        event_queue=None,
-        specialist_registry=_Registry(),
-        approval_channel=AutoApprovalChannel(),
+        approval_channel=channel,
+        pack_loop_fn=mock_loop,
     )
-    # Just verify it completes without error.
-    assert "summary" in result or "pack_results" in result
+    executor = build_leaf_executor(ctx)
+
+    from agentic_concierge.application.task_graph import TaskGraph, TaskNode
+    from agentic_concierge.application.agent_roles import ModelAssignment
+
+    graph = TaskGraph.from_root("Deploy", node_id="root")
+    child = graph.add_child("root", "Deploy service", node_id="c1")
+
+    handle = MagicMock()
+    handle.model_id = "test-model"
+    handle.chat_client = AsyncMock()
+    handle.slot = MagicMock()
+    handle.slot.model_id = "test-model"
+    handle.slot.backend = "ollama"
+    assignment = ModelAssignment(
+        role="engineer", model_id="test-model", handle=handle,
+        requirements={"instruction_following": 0.7},
+    )
+
+    result = await executor(child, graph, assignment)
+    assert result["summary"] == "ok"
+    # Verify approval_channel was passed to pack loop
+    call_kwargs = mock_loop.call_args[1]
+    assert call_kwargs["approval_channel"] is channel
 
 
 # ---------------------------------------------------------------------------

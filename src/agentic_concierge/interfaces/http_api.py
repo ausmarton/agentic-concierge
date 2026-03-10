@@ -17,7 +17,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from agentic_concierge.application.execute_task import execute_task
+from agentic_concierge.application.execute_task import execute_task, resume_execute_task
 from agentic_concierge.config import load_config
 from agentic_concierge.domain import Task, build_task
 from agentic_concierge.infrastructure.chat import build_chat_client
@@ -383,6 +383,113 @@ async def run_status(run_id: str):
             }
 
     return {"status": "running", "run_id": run_id}
+
+
+# ---------------------------------------------------------------------------
+# Resume endpoint
+# ---------------------------------------------------------------------------
+
+
+class ResumeRequest(BaseModel):
+    run_id: str
+    model_key: str = "quality"
+
+
+@app.post("/runs/{run_id}/resume")
+async def resume_run(run_id: str, req: ResumeRequest):
+    """Resume a previously interrupted run from its checkpoint.
+
+    Returns the final payload on success, 404 if run/checkpoint not found,
+    503 on LLM errors.
+    """
+    from pathlib import Path
+    from agentic_concierge.domain import RunId as _RunId
+
+    logger.info("POST /runs/%s/resume model=%s", run_id, req.model_key)
+    config = load_config()
+    workspace_root = _workspace_root()
+    run_dir = str(Path(workspace_root).resolve() / "runs" / run_id)
+
+    if not Path(run_dir).is_dir():
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id!r}")
+
+    from agentic_concierge.infrastructure.workspace.graph_checkpoint import load_checkpoint
+    ckpt = load_checkpoint(run_dir)
+    if ckpt is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No checkpoint found for run {run_id!r}. Only interrupted runs can be resumed.",
+        )
+
+    try:
+        resolved = await asyncio.to_thread(resolve_llm, config, req.model_key)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+    chat_client = build_chat_client(resolved.model_config)
+    run_repository = FileSystemRunRepository(workspace_root=workspace_root)
+    specialist_registry = ConfigSpecialistRegistry(config)
+    specialist_registry.set_runtime_models(resolved.all_chat_models)
+
+    try:
+        result = await resume_execute_task(
+            _RunId(run_id),
+            run_dir,
+            chat_client=chat_client,
+            run_repository=run_repository,
+            specialist_registry=specialist_registry,
+            config=config,
+            resolved_model_cfg=resolved.model_config,
+            resolved_llm=resolved,
+            max_steps=40,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except httpx.ConnectError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"LLM server unreachable: {e}",
+        )
+
+    out = dict(result.payload)
+    out["_meta"] = {
+        "pack": result.specialist_id,
+        "specialist_ids": result.specialist_ids,
+        "run_dir": result.run_dir,
+        "model": result.model_name,
+        "run_id": result.run_id.value,
+        "resumed": True,
+    }
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Resumable runs list
+# ---------------------------------------------------------------------------
+
+
+@app.get("/runs/resumable")
+async def list_resumable_runs():
+    """List runs that have checkpoints and can be resumed."""
+    from agentic_concierge.infrastructure.workspace.graph_checkpoint import find_resumable_runs
+    workspace_root = _workspace_root()
+    runs = find_resumable_runs(workspace_root)
+    return [
+        {
+            "run_id": r.run_id,
+            "prompt": r.prompt[:200],
+            "model_name": r.model_name,
+            "specialist_ids": r.specialist_ids,
+            "routing_method": r.routing_method,
+            "created_at": r.created_at,
+            "updated_at": r.updated_at,
+            "total_nodes": r.total_nodes,
+            "done_nodes": r.done_nodes,
+            "failed_nodes": r.failed_nodes,
+            "pending_nodes": r.pending_nodes,
+        }
+        for r in runs
+    ]
 
 
 # ---------------------------------------------------------------------------

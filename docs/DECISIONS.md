@@ -674,7 +674,7 @@ loop continues.
 **Max review iterations:** `_MAX_REVIEW_ITERATIONS = 2`. After 2 rejections, the work
 is accepted with a `_review_warning` annotation in the payload. This prevents infinite
 doer↔reviewer loops. Exposed as `max_review_iterations` parameter on `execute_task()`,
-`resume_execute_task()`, `_execute_pack_loop()`, and `_run_task_force_parallel()`.
+`resume_execute_task()`, and `_execute_pack_loop()` (threaded via `LeafExecutionContext` in V2).
 
 **Test strategy:** `execute_task()` gets `max_review_iterations: int = 2` (enabled by
 default). Test helpers (`_run()`, `_run_task_force()`, etc.) pass
@@ -773,8 +773,8 @@ escalations from a single persistent problem.
 
 **Config:**
 - `_MAX_ESCALATIONS = 2` constant in `execute_task.py`. Exposed as `max_escalations`
-  parameter on `execute_task()`, `resume_execute_task()`, `_execute_pack_loop()`, and
-  `_run_task_force_parallel()` — same threading pattern as `max_review_iterations`.
+  parameter on `execute_task()`, `resume_execute_task()`, and `_execute_pack_loop()`
+  (threaded via `LeafExecutionContext` in V2).
 - `max_escalations=0` disables escalation entirely (for tests and opt-out).
 - Not yet exposed on `ConciergeConfig` (deferred until we need per-config tuning).
 
@@ -971,7 +971,7 @@ to find the best-scoring available model.
   returns `(ModelConfig, ChatClient)`, potentially switching the model.
 - When `assignment.required_capabilities` is set (from ADR-028), it overrides template inference.
 - When only one model is available or the base model is already best, returns originals (no-op).
-- Wired into both sequential and parallel (`_run_task_force_parallel`) execution paths.
+- Available as a utility; V2 path uses `affinity_executor` for per-node model assignment.
 
 **Backward compatibility:**
 - Single-model setups (common case): returns the same model unchanged.
@@ -1135,3 +1135,169 @@ Template names are internal implementation details — never exposed to the rout
 - Mixed-capability tasks (code + web) automatically get a dynamic pack with all needed tools.
 - New capabilities can be added to `_CAPABILITY_TOOLS` without touching the orchestrator prompt.
 - Templates are just pre-tuned shortcuts for common capability combinations.
+
+---
+
+## V2 Architecture Decisions
+
+The following ADRs document the V2 three-layer architecture redesign.
+See [DESIGN_V2.md](DESIGN_V2.md) for the full design document.
+
+---
+
+### ADR-029: Model Runtime — Acquire/Release with Lifecycle Management
+
+**Status:** Accepted
+**Date:** 2026-03-09
+
+**Context:** V1 used a single `base_url` for all specialists — whatever model happened to be
+loaded in Ollama was used for everything. There was no way to load/unload models dynamically,
+track memory usage, or assign different models to different tasks. The system also couldn't
+use llama.cpp alongside Ollama.
+
+**Decision:** Introduce a `ModelRuntime` protocol in `application/ports.py` with:
+- `acquire(requirements: Dict[str, float]) → ModelHandle` — select and load the best model
+- `release(handle: ModelHandle)` — decrement refcount, eligible for eviction
+- `preload_hint(requirements)` — background load for upcoming work
+- `status() → RuntimeStatus` — loaded models, memory usage
+
+The concrete implementation `LocalModelRuntime` in `infrastructure/backends/model_runtime.py`
+manages model lifecycle with reference counting, LRU eviction, and memory budget tracking.
+
+`BackendRegistry` discovers and monitors inference backends (Ollama, LlamaCpp) with health
+checks and priority-based failover. Configuration loaded from `config/defaults/backends.yaml`.
+
+`InferenceBackend` protocol defines the per-backend contract: `load_model()`, `unload_model()`,
+`build_client()`, `estimate_memory()`, `list_available()`, `health_check()`.
+
+**Consequences:**
+- Different tasks can use different models concurrently (within memory budget).
+- Models are loaded lazily and evicted LRU when memory is tight.
+- New backends (MLX for macOS) can be added by implementing `InferenceBackend`.
+- `CapabilityProbe` validates model capabilities via micro-prompts before trusting model profiles.
+
+---
+
+### ADR-030: Recursive Task Decomposition — TaskGraph with Planner + Critic
+
+**Status:** Accepted
+**Date:** 2026-03-09
+
+**Context:** V1's `OrchestrationPlan` produced a flat list of specialist assignments in one
+LLM call. Complex tasks like "build a CRUD app with tests" need recursive decomposition:
+plan → implement → test → fix failures, where each step may itself decompose further.
+
+**Decision:** Replace flat `OrchestrationPlan` with a recursive `TaskGraph` (DAG of `TaskNode`
+objects). Each node has a state machine: `pending → decomposing → critiqued → executing →
+reviewing → done/failed`.
+
+The decomposition uses two agents:
+- **Planner**: LLM decomposes a task into subtasks with `required_capabilities`, `required_tools`,
+  and `finish_schema_key`.
+- **Critic**: Independent LLM reviews the plan and approves or rejects with feedback
+  (max 2 re-plans, fail-open).
+
+`execute_graph()` is the core executor — finds ready leaf nodes, executes them in parallel
+via `asyncio.gather`, marks done/failed, propagates completion upward.
+
+`should_decompose()` implements adaptive depth control: stops when a leaf fits the available
+model or max depth (3) is reached.
+
+**Consequences:**
+- Complex tasks are decomposed recursively instead of once.
+- Failed subtasks block dependent siblings (only `done` unblocks).
+- The planner and critic can use different models (via `must_differ_from` in agent roles).
+- The graph executor is agnostic to leaf execution — any async callback works.
+
+---
+
+### ADR-031: Agent-Model Affinity — Right Model for Right Task
+
+**Status:** Accepted
+**Date:** 2026-03-09
+
+**Context:** V1 used the same model for every role (routing, planning, coding, reviewing).
+A 7B generalist model fails at each specialised task. The reviewer rubber-stamps its own work
+because it's the same model. Different agent roles need different model capabilities.
+
+**Decision:** Define six agent roles with explicit capability requirements:
+
+| Role | Key requirements | Constraints |
+|------|-----------------|-------------|
+| router | structured_output (0.8), instruction_following (0.7) | prefer_small |
+| planner | reasoning (0.8), structured_output (0.7), instruction_following (0.8) | — |
+| critic | reasoning (0.8), instruction_following (0.7) | must_differ_from planner |
+| coder | code_python (0.8), instruction_following (0.7) | — |
+| researcher | web_comprehension (0.7), summarisation (0.7) | — |
+| reviewer | reasoning (0.8), instruction_following (0.8) | must_differ_from coder, researcher |
+
+`assign_model()` acquires the best model from `ModelRuntime` using role requirements +
+task capabilities. `must_differ_from` is fail-open: when no alternative model is available,
+the constraint is relaxed.
+
+`execute_graph_with_affinity()` wraps the graph executor: for each leaf node, determines
+the agent role → assigns model → executes work → releases handle in `finally`.
+
+Preload hints are issued for upcoming sibling nodes via `asyncio.ensure_future`, so models
+are loaded in the background while the current step executes.
+
+**Consequences:**
+- Different tasks get different models based on capability matching.
+- The reviewer always attempts to use a different model than the doer.
+- Model handles are guaranteed to be released (via `finally`), preventing memory leaks.
+- Preload hints reduce cold-start latency between sequential graph nodes.
+
+---
+
+## ADR-032: V2 graph checkpointing and resume
+
+**Status:** Accepted
+**Date:** 2026-03-10
+
+**Context:**
+After removing V1 checkpoint/resume (`RunCheckpoint`, `save_checkpoint`, `resume_execute_task`),
+the system lost the ability to resume interrupted runs. The V2 architecture uses a `TaskGraph`
+DAG instead of flat `OrchestrationPlan`, so checkpointing needs to serialize the entire graph
+state including per-node status, results, and the plan structure.
+
+**Decision:**
+Implement V2-native graph checkpointing in two layers:
+
+1. **Application layer** (`application/graph_checkpoint.py`):
+   - `serialize_graph()` / `deserialize_graph()`: Pure-data TaskGraph ↔ dict round-trip.
+   - `prepare_graph_for_resume()`: Resets in-flight nodes (`executing`, `reviewing`,
+     `decomposing`) back to `pending`; collects results from `done` nodes into
+     `prior_results` dict. This is an administrative bypass of the state machine.
+   - Schema version (`SCHEMA_VERSION = 1`) for forward compatibility.
+
+2. **Infrastructure layer** (`infrastructure/workspace/graph_checkpoint.py`):
+   - `GraphCheckpoint` dataclass: `run_id`, `prompt`, `model_name`, `specialist_ids`,
+     `graph_data` (serialized TaskGraph), `completed_node_results`, timestamps.
+   - Atomic file I/O: write to temp file + `os.replace` to prevent corruption.
+   - `save_checkpoint()`, `load_checkpoint()`, `delete_checkpoint()`.
+   - `find_resumable_runs()`: Scans workspace for runs with checkpoints where root != done.
+
+3. **Graph executor** (`graph_executor.py`, `affinity_executor.py`):
+   - New `prior_results` parameter on `execute_graph()` and `execute_graph_with_affinity()`.
+   - Pre-populates the `results` dict so completed nodes appear in the output without
+     re-execution.
+
+4. **Execution wiring** (`execute_task.py`):
+   - `_create_graph_checkpoint()`: Called after planning, before execution.
+   - `_update_graph_checkpoint()`: Called on each `node_done` / `node_failed` event.
+   - `_delete_graph_checkpoint()`: Called after successful completion.
+   - `resume_execute_task()`: Loads checkpoint, calls `prepare_graph_for_resume()`,
+     creates `LeafExecutionContext` with prior results, calls `execute_graph_with_affinity()`
+     with `prior_results`.
+
+5. **Interfaces**:
+   - CLI: `concierge resume <run_id>` command; `logs list` shows resumable markers.
+   - HTTP: `POST /runs/{run_id}/resume`, `GET /runs/resumable`.
+
+Checkpoint failures are fail-open (logged, not raised) — they never crash the main execution.
+
+**Consequences:**
+- Interrupted multi-step tasks can be resumed, skipping already-completed nodes.
+- The checkpoint file (`graph_checkpoint.json`) is atomically written to prevent corruption.
+- 82 new tests across 4 test files cover serialization, I/O, resume logic, and CLI/HTTP wiring.
+- Backward compatible: existing runs without checkpoints work unchanged.

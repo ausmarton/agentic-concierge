@@ -505,7 +505,7 @@ concierge logs show <run_id> --kinds tool_call,tool_result
 
 ## Testing
 
-**Fast CI** (no LLM required, ~60 seconds, 402+ tests):
+**Fast CI** (no LLM required, ~4 seconds, 1377+ tests):
 
 ```bash
 pip install -e ".[dev]"

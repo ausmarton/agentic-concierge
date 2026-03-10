@@ -28,15 +28,21 @@ from infrastructure or interfaces.
 ┌──────────────────▼──────────────────────────────────────────────────┐
 │  Application  (orchestration + ports)                               │
 │                                                                     │
-│   execute_task()  ·  _execute_pack_loop()  ·  resume_execute_task() │
-│   _run_task_force_parallel()  ·  _merge_parallel_payloads()         │
+│   execute_task()  ·  _execute_pack_loop()                            │
 │   _review_specialist_work()                                         │
 │   _handle_request_approval()  ·  _handle_delegate_to_specialist()   │
-│   orchestrate_task()  (OrchestrationPlan, SpecialistBrief)          │
 │   ApprovalChannel protocol  (approval.py)                           │
 │                                                                     │
+│   Execution Path:                                                   │
+│     plan_task() → TaskGraph → execute_graph_with_affinity()         │
+│     → leaf_adapter (build_leaf_executor) → _execute_pack_loop()     │
+│     AgentRole · assign_model() · run_diagnostics()                  │
+│                                                                     │
+│   Planning (used by CLI `plan` command):                            │
+│     orchestrate_task()  (OrchestrationPlan, SpecialistBrief)        │
+│                                                                     │
 │   Ports (Protocol interfaces defined here):                         │
-│     ChatClient  ·  RunRepository                                    │
+│     ChatClient  ·  RunRepository  ·  ModelRuntime (V2)              │
 │     SpecialistRegistry  ·  SpecialistPack  ·  ApprovalChannel       │
 └──────┬─────────────────────────────────┬────────────────────────────┘
        │ imports domain                  │ imports domain
@@ -53,6 +59,12 @@ from infrastructure or interfaces.
 │  FabricError    │        │    → implements ChatClient               │
 │                 │        │  FallbackChatClient (cloud quality gate) │
 │                 │        │    → wraps ChatClient                    │
+│                 │        │  LocalModelRuntime (V2)                  │
+│                 │        │    → implements ModelRuntime              │
+│                 │        │  BackendRegistry (V2)                    │
+│                 │        │    → backend discovery + failover        │
+│                 │        │  OllamaBackend / LlamaCppBackend (V2)    │
+│                 │        │    → implement InferenceBackend           │
 │                 │        │  FileSystemRunRepository                 │
 │                 │        │    → implements RunRepository            │
 │                 │        │  ConfigSpecialistRegistry                │
@@ -91,22 +103,37 @@ src/agentic_concierge/
 │   └── errors.py        FabricError · RecruitError
 │
 ├── application/
-│   ├── execute_task.py  Main use-case: orchestrate → create run → tool loop(s) → result
+│   ├── execute_task.py  Main use-case: plan → graph execute → leaf adapt → tool loop(s) → result
 │   │                    _execute_pack_loop(): one specialist's tool-calling loop
 │   │                    _review_specialist_work(): Gate 4 reviewer mini-loop
-│   │                    _run_task_force_parallel(): asyncio.gather for concurrent packs
-│   │                    _merge_parallel_payloads(): combines parallel results
 │   │                    _emit(): mirrors every event to optional event_queue (SSE)
 │   │                    Loop detection: _LOOP_DETECT_WINDOW=8, _LOOP_DETECT_THRESHOLD=2
 │   │                    Review: _MAX_REVIEW_ITERATIONS=2, _SAFE_REVIEWER_TOOLS
-│   ├── orchestrator.py  orchestrate_task() — LLM-driven task decomposition
+│   ├── leaf_adapter.py  build_leaf_executor() — bridges graph executor to _execute_pack_loop
+│   │                    LeafExecutionContext, _node_to_specialist_id, _build_node_messages
+│   ├── orchestrator.py  orchestrate_task() — used by CLI `plan` command and resume path
 │   │                    OrchestrationPlan, SpecialistBrief (with tools/role for dynamic packs)
-│   │                    create_plan tool; fallback to template_fallback on error
+│   │                    _resolve_pack_from_capabilities() — used by leaf_adapter
+│   ├── task_graph.py    TaskGraph · TaskNode — DAG-based recursive task decomposition (V2)
+│   │                    State machine: pending → decomposing → critiqued → executing → done/failed
+│   │                    from_root(), add_child(), ready_nodes(), transition(), mark_done()
+│   ├── planner.py       plan_task() — planner + critic loop with max_replans (V2)
+│   │                    _call_planner(), _call_critic(), should_decompose()
+│   │                    PlanResult with graph, reasoning, critique_feedback
+│   ├── graph_executor.py  execute_graph() — parallel leaf execution via asyncio.gather (V2)
+│   │                    ExecutionResult with completed, results, failures, steps_executed
+│   ├── agent_roles.py   6 roles: router, planner, critic, coder, researcher, reviewer (V2)
+│   │                    AgentRole(requirements, must_differ_from), assign_model()
+│   │                    ModelAssignment with role, model_id, handle
+│   ├── affinity_executor.py  execute_graph_with_affinity() — per-node model assignment (V2)
+│   │                    AffinityContext, preload hints for upcoming siblings
+│   ├── doctor.py        run_diagnostics() → DiagnosticReport (V2)
+│   │                    6 checks: config, backends, memory, registry, models, roles
 │   ├── approval.py      ApprovalChannel protocol; request_approval inline handler
 │   │                    Defines the approval contract used by execute_task
 │   ├── json_parsing.py  JSON extraction helpers
 │   └── ports.py         ChatClient · RunRepository · SpecialistRegistry
-│                        SpecialistPack · ApprovalChannel  (Protocol interfaces)
+│                        SpecialistPack · ApprovalChannel · ModelRuntime (V2)
 │
 ├── bootstrap/
 │   ├── system_probe.py    SystemProbe · GPUDevice · probe_system()
@@ -152,8 +179,6 @@ src/agentic_concierge/
 │   │   │                        embed_text() via Ollama /api/embeddings
 │   │   │                        ChromaDB dispatch when provider="chromadb"
 │   │   ├── run_index_chroma.py ChromaRunIndex — ChromaDB vector store backend
-│   │   ├── run_checkpoint.py  RunCheckpoint · save/load/delete_checkpoint()
-│   │   │                        find_resumable_runs() — scan for incomplete runs
 │   │   └── run_reader.py      list_runs() · read_run_events() → RunSummary
 │   ├── specialists/
 │   │   ├── base.py            BaseSpecialistPack
@@ -203,6 +228,13 @@ src/agentic_concierge/
 │   │   ├── auto.py            AutoApprovalChannel — always approves (testing, CI)
 │   │   ├── cli.py             CliApprovalChannel — interactive terminal prompt
 │   │   └── http.py            HttpApprovalChannel — awaits POST /runs/{id}/approve
+│   ├── backends/                                                     (V2)
+│   │   ├── protocol.py        InferenceBackend · ModelSlot · ModelHandle · RuntimeStatus
+│   │   ├── registry.py        BackendRegistry — discovery, health, priority failover
+│   │   ├── model_runtime.py   LocalModelRuntime — acquire/release, refcount, LRU eviction
+│   │   ├── ollama.py          OllamaBackend — Ollama lifecycle API (keep_alive load/unload)
+│   │   ├── llama_cpp.py       LlamaCppBackend — managed llama.cpp server processes
+│   │   └── capability_probe.py  Capability probing via micro-prompts; disk-cached
 │   ├── llm_discovery.py       resolve_llm() — probe backend, select model
 │   │                            discover_ollama_models() / discover_openai_models()
 │   │                            select_model() — closest-distance sort, same-family pref
@@ -261,35 +293,37 @@ src/agentic_concierge/
        ▼
   execute_task()
        │
-       ├─ [specialist_id is None?]
-       │    orchestrate_task(prompt, config, chat_client, model=routing_model)
-       │      → OrchestrationPlan(specialist_assignments, mode, synthesis_required)
-       │      On error: fallback to first available template (zero regression)
-       │
        ├─ [cloud_fallback configured?]
        │    wrap chat_client with FallbackChatClient(local, cloud, policy)
+       │
+       ├─ SimpleModelRuntime(chat_client, model)
        │
        ├─ RunRepository.create_run()
        │    creates .concierge/runs/<uuid>/workspace/
        │    → (RunId, run_dir, workspace_path)
        │
-       ├─ _create_initial_checkpoint()
+       ├─ [specialist_id is None?]
+       │    plan_task(prompt, chat_client,
+       │             planner_model=routing_model, critic_model=routing_model)
+       │      → PlanResult(graph=TaskGraph, reasoning, critique_feedback)
+       │      On error: single-node graph with "research" fallback
        │
-       ├─ [task_force_mode == "parallel" and len(specialist_ids) > 1]?
-       │    _run_task_force_parallel(...)
-       │      asyncio.gather(_execute_pack_loop × N)
-       │      → _merge_parallel_payloads() → combined payload
+       ├─ [specialist_id set?]
+       │    Single-node TaskGraph with specialist_id_override
        │
-       └─ [sequential, default]
-            for each specialist_id:
-              SpecialistRegistry.get_pack(id, workspace_path, network_allowed,
-                                          tools=brief.tools, role=brief.role)
-                → dynamic pack (if tools+role) or template pack or custom builder
-                → wraps with MCPAugmentedPack  (if mcp_servers)
-                → wraps with ContainerisedSpecialistPack  (if container_image)
-              _execute_pack_loop(pack, messages, …)
-                previous pack's finish_payload forwarded as context
-              _update_checkpoint(completed=..., payloads=...)
+       ├─ LeafExecutionContext(registry, run_repo, workspace, config, …)
+       │    build_leaf_executor(ctx) → WorkExecutor closure
+       │
+       └─ execute_graph_with_affinity(graph, runtime, roles, executor)
+              For each ready leaf node (parallel via asyncio.gather):
+                assign_model(node, runtime) → ModelAssignment
+                leaf_executor(node, graph, assignment):
+                  _node_to_specialist_id(node) → specialist_id
+                  SpecialistRegistry.get_pack(id, workspace_path, …)
+                  _build_node_messages(node, graph, system_prompt)
+                  _execute_pack_loop(pack, messages, …)
+                  Store result for sibling context forwarding
+              Completed nodes propagate up; parent marks done when all children done
 ```
 
 ### _execute_pack_loop detail
@@ -371,7 +405,6 @@ After the pack loop(s):
 
   append_event("run_complete") + _emit(event_queue, "run_complete", …)
   append entry to run_index.jsonl (cross-run memory)
-  _delete_run_checkpoint()
   _emit(event_queue, "_run_done_", …)   ← terminates SSE stream
   return RunResult(…)
 ```
@@ -392,31 +425,33 @@ After the pack loop(s):
               stops on _run_done_ or _run_error_ sentinel
 ```
 
-### Sequence diagram (happy path, single pack)
+### Sequence diagram (happy path)
 
 ```
- CLI/HTTP   execute_task  orchestrator  SpecReg  RunRepo   ChatClient  Pack
-    │            │            │            │        │           │        │
-    │──Task──────▶            │            │        │           │        │
-    │            │──prompt────▶            │        │           │        │
-    │            │◀──plan─────│            │        │           │        │
-    │            │──get_pack(id,tools,role)─▶        │           │        │
-    │            │◀──pack──────────────────│        │           │        │
-    │            │──create_run──────────────────────▶│           │        │
-    │            │◀──(run_id, dirs)─────────────────│           │        │
-    │            │                                  │           │        │
-    │         ┌──┤ step 0..N                        │           │        │
-    │         │  │──append(llm_request)─────────────▶           │        │
-    │         │  │──chat(msgs, tools)───────────────────────────▶        │
-    │         │  │◀──LLMResponse(tool_calls)───────────────────│        │
-    │         │  │──append(llm_response)────────────▶           │        │
-    │         │  │──execute_tool(name, args)─────────────────────────────▶
-    │         │  │◀──result dict────────────────────────────────────────│
-    │         │  │──append(tool_result)─────────────▶           │        │
-    │         └──┤ finish_task (Gates 1-4) → break              │        │
-    │            │                                              │        │
-    │            │──append(run_complete)────────────▶                    │
-    │◀──RunResult│                                                       │
+ CLI/HTTP   execute_task  planner  graph_exec  leaf_adapter  SpecReg  RunRepo  ChatClient  Pack
+    │            │           │          │           │           │        │         │         │
+    │──Task──────▶           │          │           │           │        │         │         │
+    │            │──create_run──────────────────────────────────────────▶│         │         │
+    │            │◀──(run_id, dirs)─────────────────────────────────────│         │         │
+    │            │──plan_task─▶          │           │           │        │         │         │
+    │            │◀──PlanResult(graph)───│           │           │        │         │         │
+    │            │──exec_graph_with_affinity────────▶           │        │         │         │
+    │            │           │          │──(per ready leaf)────▶│        │         │         │
+    │            │           │          │           │──get_pack─▶        │         │         │
+    │            │           │          │           │◀──pack────│        │         │         │
+    │            │           │          │           │                    │         │         │
+    │            │           │          │        ┌──┤ step 0..N          │         │         │
+    │            │           │          │        │  │──append(llm_req)───────────▶│         │
+    │            │           │          │        │  │──chat(msgs, tools)──────────▶         │
+    │            │           │          │        │  │◀──LLMResponse──────────────│         │
+    │            │           │          │        │  │──execute_tool──────────────────────────▶
+    │            │           │          │        │  │◀──result──────────────────────────────│
+    │            │           │          │        └──┤ finish_task (Gates 1-4)    │         │
+    │            │           │          │◀──payload─│           │        │         │         │
+    │            │           │          │  (propagate completion up graph)│        │         │
+    │            │◀──final_result───────│           │           │        │         │         │
+    │            │──append(run_complete)────────────────────────────────▶│         │         │
+    │◀──RunResult│           │          │           │           │        │         │         │
 ```
 
 ---
@@ -432,10 +467,9 @@ Each line is a JSON record:
 
 | `kind` | When | Key payload fields |
 |---|---|---|
-| `orchestration_plan` | Orchestrator assigned specialists | `assignments`, `mode`, `synthesis_required`, `reasoning`, `routing_method` |
-| `recruitment` | Specialist(s) selected (legacy compat) | `specialist_id`, `specialist_ids`, `required_capabilities`, `routing_method`, `is_task_force` |
-| `task_force_parallel` | Parallel task force started | `specialist_ids`, `mode: "parallel"` |
-| `pack_start` | One specialist starts (task forces) | `specialist_id`, `pack_index` |
+| `plan_result` | Planner produced task graph | `graph`, `reasoning`, `critique_feedback`, `planner_model` |
+| `recruitment` | Specialist(s) selected | `specialist_id`, `specialist_ids`, `required_capabilities`, `routing_method`, `is_task_force` |
+| `node_execution_start` | Graph executor starts a leaf node | `node_id`, `description`, `specialist_id`, `model`, `role` |
 | `llm_request` | Before each LLM call | `step`, `message_count` |
 | `llm_response` | After each LLM call | `content` (truncated to 2 000 chars), `tool_calls` |
 | `corrective_reprompt` | LLM returned plain text, re-prompting | `attempt`, `max_retries` |
@@ -665,40 +699,7 @@ execute_task()
 
 **CLI command:** `concierge plan "<prompt>"` — calls `orchestrate_task`, prints Rich panel, no run directory created.
 
-### 8.5 Session Continuation
-
-```
-Checkpoint file: {run_dir}/checkpoint.json  (plain JSON, atomic write via .tmp + rename)
-
-RunCheckpoint fields:
-  run_id, run_dir, workspace_path, task_prompt
-  specialist_ids, completed_specialists, payloads
-  task_force_mode, model_key, routing_method, required_capabilities
-  orchestration_plan (serialized dict or None)
-  created_at, updated_at
-
-execute_task() lifecycle:
-  1. After create_run() + orchestration: _create_initial_checkpoint()
-  2. After each sequential specialist: _update_checkpoint(completed=..., payloads=...)
-  3. After run_complete event: _delete_run_checkpoint()
-
-resume_execute_task(run_id, workspace_root, ...)
-  ├── load_checkpoint() → ValueError if missing or all complete
-  ├── Reconstructs plan from checkpoint.orchestration_plan
-  ├── Loops specialists: skips completed, runs remaining
-  ├── Updates checkpoint after each specialist
-  ├── Emits run_complete and deletes checkpoint
-  └── Returns RunResult
-
-find_resumable_runs(workspace_root):
-  Scans */checkpoint.json; returns run_ids with no run_complete in runlog
-```
-
-**CLI commands:**
-- `concierge resume <run-id>` — loads checkpoint, resumes run, streams events
-- `concierge logs list` — shows `(resumable)` next to interrupted run IDs
-
-### 8.6 Human Approval (ADR-021)
+### 8.5 Human Approval (ADR-021)
 
 Specialists can request human approval for high-impact actions via the `request_approval`
 tool, which is handled inline in `_execute_pack_loop` (not dispatched to the pack):
@@ -720,7 +721,7 @@ _execute_pack_loop()
   HTTP:   POST /runs/{run_id}/approve  (unblocks HttpApprovalChannel)
 ```
 
-### 8.7 Agent Delegation (ADR-022)
+### 8.6 Agent Delegation (ADR-022)
 
 Specialists can delegate sub-tasks to other specialists via the `delegate_to_specialist`
 tool, which spawns a nested `_execute_pack_loop`:

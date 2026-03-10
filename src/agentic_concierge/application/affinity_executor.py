@@ -62,6 +62,7 @@ async def execute_graph_with_affinity(
     *,
     max_steps: int = 50,
     on_event: Optional[EventCallback] = None,
+    prior_results: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> ExecutionResult:
     """Execute a task graph with automatic model assignment per node.
 
@@ -131,6 +132,7 @@ async def execute_graph_with_affinity(
         _leaf_executor,
         max_steps=max_steps,
         on_event=on_event,
+        prior_results=prior_results,
     )
 
 

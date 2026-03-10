@@ -1,12 +1,16 @@
-"""Execute task use case.
+"""Execute task use case — V2 graph-based execution.
 
-Flow: orchestrate specialist(s) → create run → for each specialist, run a
-tool loop until finish_task or max_steps; context from earlier packs is
-forwarded to later packs so the task force shares progress (sequential mode),
-or all packs run concurrently with the same initial prompt (parallel mode).
+Flow: plan_task (planner + critic) → TaskGraph → execute_graph_with_affinity
+(model assignment per node) → leaf adapter → _execute_pack_loop.
 
-The orchestrator can assign template packs (engineering, research,
-enterprise_research) or compose dynamic packs by selecting tools and roles.
+The planner decomposes the task into a TaskGraph.  The graph executor runs
+ready leaf nodes in parallel.  Each leaf is executed by the leaf adapter,
+which bridges to the battle-tested _execute_pack_loop (quality gates, loop
+detection, delegation, escalation, review).
+
+For simple tasks, the planner creates a single-node graph; the result is
+identical to V1 behavior.  For complex tasks, the graph enables recursive
+decomposition with per-node model selection.
 
 Dependencies are injected (ports only); this module never imports from
 ``interfaces``.
@@ -25,7 +29,6 @@ from agentic_concierge.config import ConciergeConfig, ModelConfig
 from agentic_concierge.config.constants import MAX_LLM_CONTENT_IN_RUNLOG_CHARS
 from agentic_concierge.domain import RecruitError, RunId, RunResult, Task
 from agentic_concierge.application.ports import ChatClient, RunRepository, SpecialistRegistry
-from agentic_concierge.application.orchestrator import orchestrate_task, OrchestrationPlan, SpecialistBrief
 from agentic_concierge.infrastructure.telemetry import get_tracer
 
 if TYPE_CHECKING:
@@ -187,58 +190,6 @@ _DELEGATE_TOOL_DEF: Dict[str, Any] = {
 }
 
 
-def _select_specialist_model(
-    assignment: Optional[SpecialistBrief],
-    available_models: List[str],
-    base_model_cfg: "ModelConfig",
-    chat_client: "ChatClient",
-) -> tuple["ModelConfig", "ChatClient"]:
-    """Select the best model for a specialist based on its task capabilities.
-
-    Returns the (possibly updated) model_cfg and chat_client.  When no better
-    model is found or only one model is available, returns the originals unchanged.
-    """
-    if not available_models or len(available_models) <= 1 or assignment is None:
-        return base_model_cfg, chat_client
-
-    from agentic_concierge.infrastructure.model_profiles import (
-        infer_task_capabilities,
-        match_models,
-    )
-
-    # Use explicit capabilities from orchestrator when available;
-    # otherwise infer from template/tools.
-    if assignment.required_capabilities:
-        from agentic_concierge.infrastructure.model_profiles import KNOWN_CAPABILITIES
-        valid_caps = [c for c in assignment.required_capabilities if c in KNOWN_CAPABILITIES]
-        caps = {c: 0.6 for c in valid_caps} if valid_caps else {}
-    else:
-        caps = infer_task_capabilities(
-            template_id=assignment.specialist_id if assignment.specialist_id != "dynamic" else None,
-            tool_names=assignment.tools,
-        )
-    if not caps:
-        return base_model_cfg, chat_client
-
-    best = match_models(available_models, required_capabilities=caps)
-    if not best or best == base_model_cfg.model:
-        return base_model_cfg, chat_client
-
-    new_cfg = ModelConfig(
-        base_url=base_model_cfg.base_url,
-        model=best,
-        backend=base_model_cfg.backend,
-        api_key=base_model_cfg.api_key,
-        timeout_s=base_model_cfg.timeout_s,
-    )
-    new_client = _rebuild_chat_client(new_cfg, chat_client)
-    logger.info(
-        "Per-specialist model: %s → %s (caps=%s)",
-        base_model_cfg.model, best, caps,
-    )
-    return new_cfg, new_client
-
-
 def _emit(
     queue: Optional[asyncio.Queue],
     kind: str,
@@ -252,26 +203,6 @@ def _emit(
         queue.put_nowait({"kind": kind, "data": data, "step": step})
     except asyncio.QueueFull:
         logger.debug("event_queue full; dropping event kind=%s", kind)
-
-
-def _get_brief(plan: Optional[OrchestrationPlan], specialist_id: str) -> str:
-    """Return the orchestrator's brief for this specialist, or '' if not available."""
-    if plan is None:
-        return ""
-    for b in plan.specialist_assignments:
-        if b.specialist_id == specialist_id:
-            return b.brief or ""
-    return ""
-
-
-def _get_assignment(plan: Optional[OrchestrationPlan], specialist_id: str) -> Optional[SpecialistBrief]:
-    """Return the full SpecialistBrief for this specialist, or None."""
-    if plan is None:
-        return None
-    for b in plan.specialist_assignments:
-        if b.specialist_id == specialist_id:
-            return b
-    return None
 
 
 async def execute_task(
@@ -289,16 +220,15 @@ async def execute_task(
     max_escalations: int = _MAX_ESCALATIONS,
     approval_channel: Optional[Any] = None,
 ) -> RunResult:
-    """Execute a task end-to-end.
+    """Execute a task end-to-end using V2 graph-based execution.
 
-    1. Orchestrate specialist(s) via orchestrate_task (falls back to template).
+    1. Decompose the task via planner + critic → TaskGraph (or single-node
+       graph when ``task.specialist_id`` is set explicitly).
     2. Create a run directory + workspace.
-    3. For each specialist, run a tool loop until ``finish_task`` or
-       ``max_steps`` is reached.  When multiple specialists are recruited
-       (a task force), the finish payload from each pack is forwarded as
-       context to the next pack.
-    4. Optionally synthesise multi-specialist outputs.
-    5. Return a ``RunResult`` with the run id, paths, and final payload.
+    3. Execute the graph via ``execute_graph_with_affinity``: ready leaf nodes
+       run in parallel, each bridged to ``_execute_pack_loop`` via the leaf
+       adapter.
+    4. Return a ``RunResult`` with the run id, paths, and final payload.
 
     Args:
         task: Prompt, optional specialist override, model key, and network flag.
@@ -308,14 +238,13 @@ async def execute_task(
         config: Fabric configuration (models, specialists, flags).
         resolved_model_cfg: Pre-resolved model config (e.g. from ``resolve_llm``).
             Falls back to ``config.models[task.model_key]`` when not provided.
-        max_steps: Maximum LLM turns *per specialist* before aborting.
-        event_queue: Optional asyncio.Queue for real-time event streaming (P8-2).
+        max_steps: Maximum LLM turns *per leaf node* before aborting.
+        event_queue: Optional asyncio.Queue for real-time event streaming.
         max_review_iterations: Max reviewer rejections before accepting (0 = disabled).
         max_escalations: Max model escalations per pack loop (0 = disabled).
 
     Returns:
-        ``RunResult`` with payload set to the final pack's ``finish_task`` args
-        (or a synthesised result for multi-specialist tasks with synthesis_required).
+        ``RunResult`` with payload from the final leaf node's ``finish_task`` args.
 
     Raises:
         RecruitError: When a specialist id is not found in config.
@@ -339,106 +268,88 @@ async def execute_task(
                 config.cloud_fallback.policy, cloud_cfg.model,
             )
 
-    # --- recruit -----------------------------------------------------------------
+    # --- model resolution --------------------------------------------------------
     model_cfg = resolved_model_cfg or config.models.get(task.model_key) or config.models["quality"]
     available_models: List[str] = resolved_llm.available_models if resolved_llm else []
-    plan: Optional[OrchestrationPlan] = None
+
+    # --- V2 task decomposition via planner + critic ---------------------------
+    from agentic_concierge.application.planner import plan_task
+    from agentic_concierge.application.task_graph import TaskGraph
+    from agentic_concierge.application.leaf_adapter import (
+        LeafExecutionContext,
+        build_leaf_executor,
+    )
+    from agentic_concierge.application.affinity_executor import execute_graph_with_affinity
+    from agentic_concierge.infrastructure.backends.simple_runtime import SimpleModelRuntime
 
     if task.specialist_id:
-        specialist_ids: List[str] = [task.specialist_id]
-        required_capabilities: List[str] = []
-        routing_method = "explicit"
-    else:
-        if resolved_llm is not None:
-            from agentic_concierge.infrastructure.llm_discovery import resolve_routing_model
-            routing_model = resolve_routing_model(resolved_llm, config)
-        else:
-            routing_cfg = config.models.get(config.routing_model_key)
-            if routing_cfg is None:
-                logger.warning(
-                    "routing_model_key %r not in config.models; using task model %r for routing",
-                    config.routing_model_key, model_cfg.model,
-                )
-                routing_cfg = model_cfg
-            routing_model = routing_cfg.model
-        plan = await orchestrate_task(
-            task.prompt, config,
-            chat_client=chat_client,
-            model=routing_model,
+        # Explicit specialist override: create a single-node graph directly,
+        # skipping the planner.  The specialist_id is mapped to capabilities
+        # via _resolve_pack_from_capabilities.
+        graph = TaskGraph.from_root(task.prompt)
+        graph.add_child(
+            graph.root_id, task.prompt,
+            required_capabilities=[],
+            required_tools=[],
+            finish_schema_key="",  # empty = use pack's built-in default
         )
-        specialist_ids = [a.specialist_id for a in plan.specialist_assignments]
-        required_capabilities = plan.required_capabilities
-        routing_method = plan.routing_method
+        # Mark root as decomposed (single child)
+        graph.transition(graph.root_id, "decomposing")
+        graph.transition(graph.root_id, "critiqued")
+        routing_method = "explicit"
+        required_capabilities: List[str] = []
+        plan_reasoning = ""
+    else:
+        # Use the V2 planner + critic to decompose the task.
+        # Planner uses the routing model (like V1 orchestrator); fallback to task model.
+        routing_cfg = config.models.get(config.routing_model_key)
+        planner_model = routing_cfg.model if routing_cfg else model_cfg.model
+        critic_model = planner_model
+        try:
+            plan_result = await plan_task(
+                task.prompt, chat_client, planner_model, critic_model,
+            )
+            graph = plan_result.graph
+            plan_reasoning = plan_result.reasoning
+        except Exception as exc:
+            logger.warning("Planner failed (%s); creating fallback single-node graph", exc)
+            graph = TaskGraph.from_root(task.prompt)
+            graph.add_child(
+                graph.root_id, task.prompt,
+                required_capabilities=["instruction_following"],
+                finish_schema_key="general",
+            )
+            graph.transition(graph.root_id, "decomposing")
+            graph.transition(graph.root_id, "critiqued")
+            plan_reasoning = f"planner_fallback: {exc}"
+        routing_method = "planner"
+        # Collect required capabilities from all leaf nodes
+        required_capabilities = []
+        for leaf in graph.leaves():
+            for cap in leaf.required_capabilities:
+                if cap not in required_capabilities:
+                    required_capabilities.append(cap)
 
-        # --- model tier selection (ADR-023) ---
-        # The orchestrator recommends "fast" or "quality".  When "fast" is
-        # recommended and we have a fast model config, resolve the best
-        # available model for that tier.  If the fast model isn't available
-        # and auto_pull is enabled, pull it.  Adaptive escalation (ADR-020)
-        # will upgrade to a larger model if the fast one can't handle the task.
-        if plan.recommended_model_key != task.model_key:
-            tier_cfg = config.models.get(plan.recommended_model_key)
-            if tier_cfg is not None:
-                preferred = tier_cfg.model
-                if preferred in available_models:
-                    tier_model = preferred
-                elif config.auto_pull_if_missing and tier_cfg.backend == "ollama":
-                    # The fast model isn't available — pull it.
-                    from agentic_concierge.infrastructure.llm_discovery import (
-                        _ollama_pull, _ollama_root, discover_ollama_models,
-                        _is_ollama_chat_capable, select_model as _select_model,
-                    )
-                    logger.info(
-                        "Fast model %s not available; pulling it now...", preferred,
-                    )
-                    _emit(event_queue, "model_pull", {"model": preferred})
-                    ollama_root = _ollama_root(tier_cfg.base_url)
-                    if _ollama_pull(preferred, ollama_root, timeout_s=600):
-                        # Re-discover after pull
-                        fresh = discover_ollama_models(tier_cfg.base_url, timeout_s=15.0)
-                        fresh = [m for m in (fresh or []) if _is_ollama_chat_capable(m)]
-                        tier_model = _select_model(preferred, fresh, is_ollama=True)
-                        if tier_model:
-                            available_models.append(tier_model)
-                        else:
-                            tier_model = None
-                    else:
-                        logger.warning("Failed to pull %s; keeping %s", preferred, model_cfg.model)
-                        tier_model = None
-                else:
-                    tier_model = None
-
-                if tier_model is not None and tier_model != model_cfg.model:
-                    old_model = model_cfg.model
-                    model_cfg = tier_cfg.model_copy(update={"model": tier_model})
-                    from agentic_concierge.infrastructure.chat import build_chat_client
-                    chat_client = build_chat_client(model_cfg)
-                    logger.info(
-                        "Model tier: using %s for this task (was %s)",
-                        tier_model, old_model,
-                    )
-                elif tier_model is None:
-                    logger.info(
-                        "Model tier %r: no suitable model; keeping %s",
-                        plan.recommended_model_key, model_cfg.model,
-                    )
-
-    for sid in specialist_ids:
-        if sid != "dynamic" and sid not in config.specialists:
-            raise RecruitError(f"Unknown specialist: {sid!r}")
+    # Determine specialist_ids from the graph for event logging
+    if task.specialist_id:
+        specialist_ids = [task.specialist_id]
+    else:
+        specialist_ids = []
+        for leaf in graph.leaves():
+            from agentic_concierge.application.leaf_adapter import _node_to_specialist_id
+            sid = _node_to_specialist_id(leaf)
+            if sid not in specialist_ids:
+                specialist_ids.append(sid)
+        if not specialist_ids:
+            specialist_ids = ["research"]  # fallback
 
     # --- setup -------------------------------------------------------------------
     run_id, run_dir, workspace_path = run_repository.create_run()
     is_task_force = len(specialist_ids) > 1
     logger.info(
-        "Task started: specialists=%s run_id=%s task_force=%s",
-        specialist_ids, run_id.value, is_task_force,
+        "Task started: specialists=%s run_id=%s task_force=%s routing=%s",
+        specialist_ids, run_id.value, is_task_force, routing_method,
     )
-
-    task_force_mode = config.task_force_mode if is_task_force else "sequential"
-    # Allow orchestrator to override task_force_mode for multi-specialist runs
-    if plan is not None and is_task_force and plan.mode in ("sequential", "parallel"):
-        task_force_mode = plan.mode
 
     # Log recruitment event
     _recruitment_event = {
@@ -448,219 +359,136 @@ async def execute_task(
         "routing_method": routing_method,
         "is_task_force": is_task_force,
         "model": model_cfg.model,
-        "model_tier": plan.recommended_model_key if plan else task.model_key,
+        "model_tier": task.model_key,
     }
     run_repository.append_event(run_id, "recruitment", _recruitment_event, step=None)
     _emit(event_queue, "recruitment", _recruitment_event)
 
-    # Emit orchestration_plan event when orchestrator was used
-    if plan is not None and plan.routing_method == "orchestrator":
-        _orch_plan_ev = {
-            "assignments": [
-                {"specialist_id": b.specialist_id, "brief": b.brief}
-                for b in plan.specialist_assignments
-            ],
-            "mode": plan.mode,
-            "synthesis_required": plan.synthesis_required,
-            "reasoning": plan.reasoning,
-            "model_tier": plan.recommended_model_key,
-        }
-        run_repository.append_event(run_id, "orchestration_plan", _orch_plan_ev, step=None)
-        _emit(event_queue, "orchestration_plan", _orch_plan_ev)
+    # Emit task_graph event with decomposition info
+    _graph_event = {
+        "node_count": graph.node_count(),
+        "leaf_count": len(graph.leaves()),
+        "max_depth": graph.max_depth(),
+        "reasoning": plan_reasoning,
+        "routing_method": routing_method,
+    }
+    run_repository.append_event(run_id, "task_graph", _graph_event, step=None)
+    _emit(event_queue, "task_graph", _graph_event)
 
-    # Create initial checkpoint (non-fatal; failure logs a warning)
-    _checkpoint = _create_initial_checkpoint(
-        run_id=run_id.value,
-        run_dir=run_dir,
-        workspace_path=workspace_path,
-        task=task,
-        specialist_ids=specialist_ids,
-        task_force_mode=task_force_mode,
-        model_cfg=model_cfg,
-        routing_method=routing_method,
-        required_capabilities=required_capabilities,
-        plan=plan,
-    )
-
-    # --- pack loop ---------------------------------------------------------------
+    # --- V2 graph execution via affinity executor + leaf adapter ---------------
     tracer = get_tracer()
     final_payload: Dict[str, Any] = {}
+
+    # Create model runtime (SimpleModelRuntime for backward compat;
+    # will be replaced by LocalModelRuntime when backend registry is wired)
+    runtime = SimpleModelRuntime(
+        chat_client, model_cfg.model,
+        available_models=available_models,
+        backend=getattr(model_cfg, "backend", None) or "ollama",
+    )
+
+    # Build the leaf executor context
+    leaf_ctx = LeafExecutionContext(
+        specialist_registry=specialist_registry,
+        run_repository=run_repository,
+        run_id=run_id,
+        workspace_path=workspace_path,
+        config=config,
+        network_allowed=task.network_allowed,
+        max_steps=max_steps,
+        max_review_iterations=max_review_iterations,
+        max_escalations=max_escalations,
+        approval_channel=approval_channel,
+        event_queue=event_queue,
+        tracer=tracer,
+        specialist_id_override=task.specialist_id if task.specialist_id else None,
+        available_models=available_models,
+    )
+    leaf_fn = build_leaf_executor(leaf_ctx)
+
+    # --- checkpoint: create initial snapshot ----------------------------------
+    _create_graph_checkpoint(
+        run_dir, run_id, task.prompt, model_cfg.model,
+        specialist_ids, routing_method, graph,
+    )
+
+    def _on_graph_event(kind: str, data: Dict[str, Any]) -> None:
+        """Forward graph execution events to the run log and event queue."""
+        run_repository.append_event(run_id, kind, data, step=None)
+        _emit(event_queue, kind, data)
+        # Update checkpoint after each node completion
+        if kind in ("node_done", "node_failed"):
+            _update_graph_checkpoint(run_dir, graph, leaf_ctx.completed_results)
 
     with tracer.start_as_current_span("concierge.execute_task") as root_span:
         root_span.set_attribute("run_id", run_id.value)
         root_span.set_attribute("specialist_ids", ",".join(specialist_ids))
         root_span.set_attribute("is_task_force", is_task_force)
         root_span.set_attribute("routing_method", routing_method)
-        root_span.set_attribute("task_force_mode", task_force_mode)
 
-        if task_force_mode == "parallel" and len(specialist_ids) > 1:
-            # Parallel: all packs run concurrently; each gets the original prompt.
-            tf_event = {"specialist_ids": specialist_ids, "mode": "parallel"}
-            run_repository.append_event(run_id, "task_force_parallel", tf_event, step=None)
-            _emit(event_queue, "task_force_parallel", tf_event)
-            logger.info(
-                "Task force PARALLEL: specialists=%s run_id=%s",
-                specialist_ids, run_id.value,
-            )
-            final_payload = await _run_task_force_parallel(
-                specialist_ids=specialist_ids,
-                task=task,
-                workspace_path=workspace_path,
-                model_cfg=model_cfg,
-                chat_client=chat_client,
-                run_repository=run_repository,
-                run_id=run_id,
-                max_steps=max_steps,
-                tracer=tracer,
-                event_queue=event_queue,
-                specialist_registry=specialist_registry,
-                plan=plan,
-                available_models=available_models,
-                max_review_iterations=max_review_iterations,
-                max_escalations=max_escalations,
-                approval_channel=approval_channel,
-                config=config,
-            )
+        execution_result = await execute_graph_with_affinity(
+            graph,
+            runtime,
+            leaf_fn,
+            max_steps=max_steps,
+            on_event=_on_graph_event,
+        )
 
-            # Update checkpoint after all parallel specialists complete
-            _update_checkpoint(
-                _checkpoint, run_dir,
-                completed=specialist_ids,
-                payloads=final_payload.get("pack_results", {}),
-            )
-
-            # Synthesis step for parallel mode
-            if plan is not None and plan.synthesis_required:
-                try:
-                    final_payload = await _synthesise_results(
-                        original_prompt=task.prompt,
-                        specialist_payloads=final_payload.get("pack_results", {}),
-                        chat_client=chat_client,
-                        model_cfg=model_cfg,
-                        run_repository=run_repository,
-                        run_id=run_id,
-                        event_queue=event_queue,
-                    )
-                except Exception as exc:
-                    logger.warning("Synthesis failed (%s); using merged parallel result", exc)
-
-        else:
-            # Sequential: each pack receives context from the previous pack.
-            prev_finish_payload: Optional[Dict[str, Any]] = None
-            all_specialist_payloads: Dict[str, Any] = {}
-
-            for pack_idx, specialist_id in enumerate(specialist_ids):
-                assignment = _get_assignment(plan, specialist_id)
-                pack = specialist_registry.get_pack(
-                    specialist_id, workspace_path, task.network_allowed,
-                    tools=assignment.tools if assignment else None,
-                    role=assignment.role if assignment else None,
-                    finish_schema_key=assignment.finish_schema if assignment else None,
-                )
-
-                # Per-specialist model selection (ADR-024)
-                spec_model_cfg, spec_chat_client = _select_specialist_model(
-                    assignment, available_models, model_cfg, chat_client,
-                )
-
-                if is_task_force:
-                    pack_start_ev = {"specialist_id": specialist_id, "pack_index": pack_idx}
-                    run_repository.append_event(run_id, "pack_start", pack_start_ev, step=None)
-                    _emit(event_queue, "pack_start", pack_start_ev)
-                    logger.info(
-                        "Task force SEQUENTIAL: starting pack %d/%d specialist=%s run_id=%s",
-                        pack_idx + 1, len(specialist_ids), specialist_id, run_id.value,
-                    )
-
-                # Build initial messages for this pack.
-                if prev_finish_payload is None:
-                    user_content = f"Task:\n{task.prompt}"
+        # Extract final payload from execution result
+        if execution_result.completed and execution_result.results:
+            # Get the root node's merged result, or the last leaf's result
+            root_result = graph.root.result
+            if root_result:
+                # Root result is a dict of child_id → child_result
+                # Use the last child's result as final payload
+                if isinstance(root_result, dict):
+                    # If root has merged children results, use the last one
+                    child_ids = list(root_result.keys())
+                    if child_ids:
+                        last_result = root_result[child_ids[-1]]
+                        if isinstance(last_result, dict):
+                            final_payload = last_result
+                        else:
+                            final_payload = root_result
+                    else:
+                        final_payload = root_result
                 else:
-                    prev_specialist_id = specialist_ids[pack_idx - 1]
-                    context_block = json.dumps(prev_finish_payload, indent=2, ensure_ascii=False)
-                    user_content = (
-                        f"Task:\n{task.prompt}\n\n"
-                        f"Context from '{prev_specialist_id}' specialist "
-                        f"(prior task-force member):\n{context_block}"
-                    )
-
-                # Inject orchestrator brief if available
-                brief_text = _get_brief(plan, specialist_id)
-                if brief_text:
-                    user_content += f"\n\nYour specific assignment:\n{brief_text}"
-
-                messages: List[Dict[str, Any]] = [
-                    {"role": "system", "content": pack.system_prompt},
-                    {"role": "user", "content": user_content},
-                ]
-
-                step_prefix = f"{specialist_id}_" if is_task_force else ""
-
-                pack_payload = await _execute_pack_loop(
-                    pack=pack,
-                    messages=messages,
-                    model_cfg=spec_model_cfg,
-                    chat_client=spec_chat_client,
-                    run_repository=run_repository,
-                    run_id=run_id,
-                    step_prefix=step_prefix,
-                    max_steps=max_steps,
-                    tracer=tracer,
-                    specialist_id=specialist_id,
-                    event_queue=event_queue,
-                    available_models=available_models,
-                    max_review_iterations=max_review_iterations,
-                    max_escalations=max_escalations,
-                    approval_channel=approval_channel,
-                    delegation_depth=_MAX_DELEGATION_DEPTH,
-                    specialist_registry=specialist_registry,
-                    workspace_path=workspace_path,
-                    config=config,
-                    finish_schema_key=assignment.finish_schema if assignment else None,
-                )
-
-                all_specialist_payloads[specialist_id] = pack_payload
-                prev_finish_payload = pack_payload
-                final_payload = pack_payload
-
-                # Update checkpoint after each specialist completes
-                _update_checkpoint(
-                    _checkpoint, run_dir,
-                    completed=list(all_specialist_payloads.keys()),
-                    payloads=dict(all_specialist_payloads),
-                )
-
-            # Synthesis step for sequential mode
-            if plan is not None and plan.synthesis_required and len(all_specialist_payloads) > 1:
-                try:
-                    final_payload = await _synthesise_results(
-                        original_prompt=task.prompt,
-                        specialist_payloads=all_specialist_payloads,
-                        chat_client=chat_client,
-                        model_cfg=model_cfg,
-                        run_repository=run_repository,
-                        run_id=run_id,
-                        event_queue=event_queue,
-                    )
-                except Exception as exc:
-                    logger.warning("Synthesis failed (%s); using last specialist result", exc)
+                    final_payload = root_result
+            else:
+                # Fallback: use results from the last completed leaf
+                for node_id, result in reversed(list(execution_result.results.items())):
+                    if result:
+                        final_payload = result
+                        break
+        elif execution_result.results:
+            # Partial completion: use whatever we have
+            for node_id, result in reversed(list(execution_result.results.items())):
+                if result:
+                    final_payload = result
+                    break
+            logger.warning(
+                "Graph execution incomplete: %d/%d nodes completed",
+                len(execution_result.results),
+                graph.node_count(),
+            )
 
     logger.info(
-        "Task completed: run_id=%s specialists=%s is_task_force=%s mode=%s",
-        run_id.value, specialist_ids, is_task_force, task_force_mode,
+        "Task completed: run_id=%s specialists=%s is_task_force=%s mode=graph",
+        run_id.value, specialist_ids, is_task_force,
     )
+
+    # Delete checkpoint on successful completion
+    if execution_result.completed:
+        _delete_graph_checkpoint(run_dir)
 
     # Write a "run_complete" event
     _run_complete_ev = {
         "run_id": run_id.value,
         "specialist_ids": specialist_ids,
-        "task_force_mode": task_force_mode,
+        "task_force_mode": "graph",
     }
     run_repository.append_event(run_id, "run_complete", _run_complete_ev, step=None)
     _emit(event_queue, "run_complete", _run_complete_ev)
-
-    # Delete checkpoint on successful completion
-    _delete_run_checkpoint(run_dir)
 
     result = RunResult(
         run_id=run_id,
@@ -729,16 +557,82 @@ async def execute_task(
 
 
 # ---------------------------------------------------------------------------
-# Session continuation: resume an interrupted run
+# Graph checkpoint helpers
+# ---------------------------------------------------------------------------
+
+def _create_graph_checkpoint(
+    run_dir: str,
+    run_id: RunId,
+    prompt: str,
+    model_name: str,
+    specialist_ids: List[str],
+    routing_method: str,
+    graph: Any,
+) -> None:
+    """Create an initial graph checkpoint after planning."""
+    try:
+        from agentic_concierge.application.graph_checkpoint import serialize_graph
+        from agentic_concierge.infrastructure.workspace.graph_checkpoint import (
+            GraphCheckpoint,
+            save_checkpoint,
+        )
+        ckpt = GraphCheckpoint(
+            run_id=run_id.value,
+            prompt=prompt,
+            model_name=model_name,
+            specialist_ids=specialist_ids,
+            graph_data=serialize_graph(graph),
+            routing_method=routing_method,
+        )
+        save_checkpoint(run_dir, ckpt)
+    except Exception as exc:
+        logger.warning("Failed to create graph checkpoint: %s", exc)
+
+
+def _update_graph_checkpoint(
+    run_dir: str,
+    graph: Any,
+    completed_results: Dict[str, Dict[str, Any]],
+) -> None:
+    """Update the graph checkpoint with current graph state."""
+    try:
+        from agentic_concierge.application.graph_checkpoint import serialize_graph
+        from agentic_concierge.infrastructure.workspace.graph_checkpoint import (
+            load_checkpoint,
+            save_checkpoint,
+        )
+        ckpt = load_checkpoint(run_dir)
+        if ckpt is None:
+            return
+        ckpt.graph_data = serialize_graph(graph)
+        ckpt.completed_node_results = dict(completed_results)
+        save_checkpoint(run_dir, ckpt)
+    except Exception as exc:
+        logger.warning("Failed to update graph checkpoint: %s", exc)
+
+
+def _delete_graph_checkpoint(run_dir: str) -> None:
+    """Delete the graph checkpoint on successful completion."""
+    try:
+        from agentic_concierge.infrastructure.workspace.graph_checkpoint import (
+            delete_checkpoint,
+        )
+        delete_checkpoint(run_dir)
+    except Exception as exc:
+        logger.warning("Failed to delete graph checkpoint: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Resume execution from checkpoint
 # ---------------------------------------------------------------------------
 
 async def resume_execute_task(
-    run_id: str,
-    workspace_root: str,
+    run_id: RunId,
+    run_dir: str,
     *,
-    chat_client: ChatClient,
-    run_repository: RunRepository,
-    specialist_registry: SpecialistRegistry,
+    chat_client: "ChatClient",
+    run_repository: "RunRepository",
+    specialist_registry: "SpecialistRegistry",
     config: ConciergeConfig,
     resolved_model_cfg: Optional[ModelConfig] = None,
     resolved_llm: Optional["ResolvedLLM"] = None,
@@ -748,304 +642,203 @@ async def resume_execute_task(
     max_escalations: int = _MAX_ESCALATIONS,
     approval_channel: Optional[Any] = None,
 ) -> RunResult:
-    """Resume an interrupted run from its checkpoint.
+    """Resume a previously checkpointed task execution.
 
-    Loads ``{workspace_root}/runs/{run_id}/checkpoint.json``, skips already-completed
-    specialists, seeds ``prev_finish_payload`` from the last completed specialist's
-    payload, and runs the remaining specialists through the existing sequential loop.
+    Loads the graph checkpoint from *run_dir*, resets in-flight nodes to
+    ``pending``, and re-executes the graph.  Already-completed nodes are
+    skipped via ``prior_results``.
 
     Args:
-        run_id: The run ID to resume.
-        workspace_root: Root of the workspace (contains ``runs/``).
-        chat_client: LLM interface.
-        run_repository: Run log and event repository.
-        specialist_registry: Resolves packs by specialist ID.
-        config: Concierge configuration.
-        resolved_model_cfg: Pre-resolved model config; falls back to checkpoint's model_key.
-        max_steps: Maximum LLM turns per specialist.
-        event_queue: Optional asyncio.Queue for streaming.
-        max_escalations: Max model escalations per pack loop (0 = disabled).
+        run_id: Run identifier for the existing run.
+        run_dir: Path to the existing run directory.
+        chat_client, run_repository, specialist_registry, config:
+            Same as ``execute_task``.
+        resolved_model_cfg: Model config override.
+        resolved_llm: Resolved LLM info (for available_models).
+        max_steps: Max LLM turns per leaf node.
+        event_queue: Optional event queue for streaming.
+        max_review_iterations: Max reviewer rejections.
+        max_escalations: Max model escalations.
+        approval_channel: Optional approval channel.
 
     Returns:
-        ``RunResult`` with the final payload from the resumed run.
+        ``RunResult`` with the final payload.
 
     Raises:
-        ValueError: When no checkpoint is found or the run is already complete.
+        ValueError: If no checkpoint exists or it is invalid.
     """
-    from pathlib import Path
-    from agentic_concierge.infrastructure.workspace.run_checkpoint import (
+    from agentic_concierge.application.graph_checkpoint import (
+        deserialize_graph,
+        prepare_graph_for_resume,
+        serialize_graph,
+    )
+    from agentic_concierge.infrastructure.workspace.graph_checkpoint import (
+        GraphCheckpoint,
         load_checkpoint,
         save_checkpoint,
-        delete_checkpoint,
     )
-    from agentic_concierge.domain import RunId as _RunId
+    from agentic_concierge.application.leaf_adapter import (
+        LeafExecutionContext,
+        build_leaf_executor,
+        _node_to_specialist_id,
+    )
+    from agentic_concierge.application.affinity_executor import execute_graph_with_affinity
+    from agentic_concierge.infrastructure.backends.simple_runtime import SimpleModelRuntime
 
-    run_dir = str(Path(workspace_root) / "runs" / run_id)
-    checkpoint = load_checkpoint(run_dir)
-    if checkpoint is None:
-        raise ValueError(f"No checkpoint found for run {run_id!r}")
+    # --- load checkpoint ---------------------------------------------------------
+    ckpt = load_checkpoint(run_dir)
+    if ckpt is None:
+        raise ValueError(f"No checkpoint found in {run_dir}")
+    if not ckpt.graph_data:
+        raise ValueError(f"Checkpoint in {run_dir} has no graph data")
 
-    remaining_specialists = [
-        s for s in checkpoint.specialist_ids
-        if s not in checkpoint.completed_specialists
-    ]
-    if not remaining_specialists:
-        raise ValueError(f"Run {run_id!r} is already complete (all specialists finished)")
-
-    run_id_obj = _RunId(value=checkpoint.run_id)
-    specialist_ids = checkpoint.specialist_ids
-    model_cfg = (
-        resolved_model_cfg
-        or config.models.get(checkpoint.model_key)
-        or config.models["quality"]
+    graph = deserialize_graph(ckpt.graph_data)
+    prior_results = prepare_graph_for_resume(
+        graph, prior_results=dict(ckpt.completed_node_results),
     )
 
-    # Reconstruct orchestration plan from checkpoint if available
-    plan: Optional[OrchestrationPlan] = None
-    if checkpoint.orchestration_plan is not None:
-        from agentic_concierge.application.orchestrator import SpecialistBrief
-        assignments = [
-            SpecialistBrief(a["specialist_id"], a.get("brief", ""))
-            for a in checkpoint.orchestration_plan.get("assignments", [])
-        ]
-        plan = OrchestrationPlan(
-            specialist_assignments=assignments,
-            mode=checkpoint.orchestration_plan.get("mode", "sequential"),
-            synthesis_required=checkpoint.orchestration_plan.get("synthesis_required", False),
-            reasoning=checkpoint.orchestration_plan.get("reasoning", ""),
-            routing_method=checkpoint.routing_method,
-            required_capabilities=checkpoint.required_capabilities,
-        )
+    # --- cloud fallback wrapping -------------------------------------------------
+    if config.cloud_fallback:
+        cloud_cfg = config.models.get(config.cloud_fallback.model_key)
+        if cloud_cfg is None:
+            logger.warning(
+                "cloud_fallback.model_key %r not found in config.models; cloud fallback disabled",
+                config.cloud_fallback.model_key,
+            )
+        else:
+            from agentic_concierge.infrastructure.chat import build_chat_client
+            from agentic_concierge.infrastructure.chat.fallback import FallbackChatClient, FallbackPolicy
+            cloud_client = build_chat_client(cloud_cfg)
+            policy = FallbackPolicy(config.cloud_fallback.policy)
+            chat_client = FallbackChatClient(chat_client, cloud_client, cloud_cfg.model, policy)
 
+    # --- model resolution --------------------------------------------------------
+    model_cfg = resolved_model_cfg or config.models.get("quality")
+    if model_cfg is None:
+        raise ValueError("No model config available for resume")
+    available_models: List[str] = resolved_llm.available_models if resolved_llm else []
+
+    # --- determine specialist ids from graph ----------------------------------
+    specialist_ids = list(ckpt.specialist_ids)
+    if not specialist_ids:
+        for leaf in graph.leaves():
+            sid = _node_to_specialist_id(leaf)
+            if sid not in specialist_ids:
+                specialist_ids.append(sid)
+        if not specialist_ids:
+            specialist_ids = ["research"]
+
+    workspace_path = str(run_dir) + "/workspace"
+
+    # Log resume event
+    _resume_event = {
+        "run_id": run_id.value,
+        "prior_done_nodes": len(prior_results),
+        "total_nodes": graph.node_count(),
+        "specialist_ids": specialist_ids,
+    }
+    run_repository.append_event(run_id, "resume", _resume_event, step=None)
+    _emit(event_queue, "resume", _resume_event)
+
+    # --- graph execution ---------------------------------------------------------
     tracer = get_tracer()
+    runtime = SimpleModelRuntime(
+        chat_client, model_cfg.model,
+        available_models=available_models,
+        backend=getattr(model_cfg, "backend", None) or "ollama",
+    )
+
+    leaf_ctx = LeafExecutionContext(
+        specialist_registry=specialist_registry,
+        run_repository=run_repository,
+        run_id=run_id,
+        workspace_path=workspace_path,
+        config=config,
+        network_allowed=True,
+        max_steps=max_steps,
+        max_review_iterations=max_review_iterations,
+        max_escalations=max_escalations,
+        approval_channel=approval_channel,
+        event_queue=event_queue,
+        tracer=tracer,
+        available_models=available_models,
+        completed_results=dict(prior_results),
+    )
+    leaf_fn = build_leaf_executor(leaf_ctx)
+
+    # Update checkpoint with reset graph state
+    ckpt.graph_data = serialize_graph(graph)
+    save_checkpoint(run_dir, ckpt)
+
+    def _on_graph_event(kind: str, data: Dict[str, Any]) -> None:
+        run_repository.append_event(run_id, kind, data, step=None)
+        _emit(event_queue, kind, data)
+        if kind in ("node_done", "node_failed"):
+            _update_graph_checkpoint(run_dir, graph, leaf_ctx.completed_results)
+
     final_payload: Dict[str, Any] = {}
-    all_specialist_payloads: Dict[str, Any] = dict(checkpoint.payloads)
-
-    # Seed prev_finish_payload from last completed specialist
-    prev_finish_payload: Optional[Dict[str, Any]] = None
-    if checkpoint.completed_specialists:
-        last_completed = checkpoint.completed_specialists[-1]
-        prev_finish_payload = checkpoint.payloads.get(last_completed)
-
-    is_task_force = len(specialist_ids) > 1
 
     with tracer.start_as_current_span("concierge.resume_execute_task") as root_span:
-        root_span.set_attribute("run_id", run_id)
-        root_span.set_attribute("remaining_specialists", ",".join(remaining_specialists))
+        root_span.set_attribute("run_id", run_id.value)
+        root_span.set_attribute("resumed", True)
 
-        for pack_idx, specialist_id in enumerate(specialist_ids):
-            if specialist_id in checkpoint.completed_specialists:
-                # Skip already-completed specialists
-                prev_finish_payload = checkpoint.payloads.get(specialist_id, prev_finish_payload)
-                continue
+        execution_result = await execute_graph_with_affinity(
+            graph,
+            runtime,
+            leaf_fn,
+            max_steps=max_steps,
+            on_event=_on_graph_event,
+            prior_results=prior_results,
+        )
 
-            pack = specialist_registry.get_pack(specialist_id, checkpoint.workspace_path, True)
-
-            if is_task_force:
-                pack_start_ev = {
-                    "specialist_id": specialist_id,
-                    "pack_index": pack_idx,
-                    "resumed": True,
-                }
-                run_repository.append_event(run_id_obj, "pack_start", pack_start_ev, step=None)
-                _emit(event_queue, "pack_start", pack_start_ev)
-
-            # Build messages
-            if prev_finish_payload is None:
-                user_content = f"Task:\n{checkpoint.task_prompt}"
+        if execution_result.completed and execution_result.results:
+            root_result = graph.root.result
+            if root_result:
+                if isinstance(root_result, dict):
+                    child_ids = list(root_result.keys())
+                    if child_ids:
+                        last_result = root_result[child_ids[-1]]
+                        if isinstance(last_result, dict):
+                            final_payload = last_result
+                        else:
+                            final_payload = root_result
+                    else:
+                        final_payload = root_result
+                else:
+                    final_payload = root_result
             else:
-                prev_idx = pack_idx - 1
-                prev_sid = specialist_ids[prev_idx] if prev_idx >= 0 else "previous"
-                context_block = json.dumps(prev_finish_payload, indent=2, ensure_ascii=False)
-                user_content = (
-                    f"Task:\n{checkpoint.task_prompt}\n\n"
-                    f"Context from '{prev_sid}' specialist "
-                    f"(prior task-force member):\n{context_block}"
-                )
+                for node_id, res in reversed(list(execution_result.results.items())):
+                    if res:
+                        final_payload = res
+                        break
+        elif execution_result.results:
+            for node_id, res in reversed(list(execution_result.results.items())):
+                if res:
+                    final_payload = res
+                    break
 
-            brief_text = _get_brief(plan, specialist_id)
-            if brief_text:
-                user_content += f"\n\nYour specific assignment:\n{brief_text}"
+    # Delete checkpoint on successful completion
+    if execution_result.completed:
+        _delete_graph_checkpoint(run_dir)
 
-            messages: List[Dict[str, Any]] = [
-                {"role": "system", "content": pack.system_prompt},
-                {"role": "user", "content": user_content},
-            ]
-
-            step_prefix = f"{specialist_id}_" if is_task_force else ""
-
-            # Resume path: finish_schema_key not available from checkpoint.
-            pack_payload = await _execute_pack_loop(
-                pack=pack,
-                messages=messages,
-                model_cfg=model_cfg,
-                chat_client=chat_client,
-                run_repository=run_repository,
-                run_id=run_id_obj,
-                step_prefix=step_prefix,
-                max_steps=max_steps,
-                tracer=tracer,
-                specialist_id=specialist_id,
-                event_queue=event_queue,
-                available_models=resolved_llm.available_models if resolved_llm else [],
-                max_review_iterations=max_review_iterations,
-                max_escalations=max_escalations,
-                approval_channel=approval_channel,
-                delegation_depth=_MAX_DELEGATION_DEPTH,
-                specialist_registry=specialist_registry,
-                workspace_path=checkpoint.workspace_path,
-                config=config,
-            )
-
-            all_specialist_payloads[specialist_id] = pack_payload
-            prev_finish_payload = pack_payload
-            final_payload = pack_payload
-
-            # Update checkpoint
-            try:
-                import time
-                checkpoint.completed_specialists = checkpoint.completed_specialists + [specialist_id]
-                checkpoint.payloads = dict(all_specialist_payloads)
-                checkpoint.updated_at = time.time()
-                save_checkpoint(run_dir, checkpoint)
-            except Exception as exc:
-                logger.warning("Failed to update checkpoint after specialist %s: %s", specialist_id, exc)
-
-    # Synthesis step
-    if plan is not None and plan.synthesis_required and len(all_specialist_payloads) > 1:
-        try:
-            final_payload = await _synthesise_results(
-                original_prompt=checkpoint.task_prompt,
-                specialist_payloads=all_specialist_payloads,
-                chat_client=chat_client,
-                model_cfg=model_cfg,
-                run_repository=run_repository,
-                run_id=run_id_obj,
-                event_queue=event_queue,
-            )
-        except Exception as exc:
-            logger.warning("Synthesis failed during resume (%s); using last specialist result", exc)
-
-    # Emit run_complete
     _run_complete_ev = {
-        "run_id": run_id,
+        "run_id": run_id.value,
         "specialist_ids": specialist_ids,
-        "task_force_mode": checkpoint.task_force_mode,
-        "resumed": True,
+        "task_force_mode": "graph_resumed",
     }
-    run_repository.append_event(run_id_obj, "run_complete", _run_complete_ev, step=None)
+    run_repository.append_event(run_id, "run_complete", _run_complete_ev, step=None)
     _emit(event_queue, "run_complete", _run_complete_ev)
 
-    # Delete checkpoint
-    try:
-        delete_checkpoint(run_dir)
-    except Exception as exc:
-        logger.warning("Failed to delete checkpoint after resume: %s", exc)
-
-    result = RunResult(
-        run_id=run_id_obj,
-        run_dir=checkpoint.run_dir,
-        workspace_path=checkpoint.workspace_path,
+    return RunResult(
+        run_id=run_id,
+        run_dir=run_dir,
+        workspace_path=workspace_path,
         specialist_id=specialist_ids[0],
         model_name=model_cfg.model,
         payload=final_payload,
-        required_capabilities=checkpoint.required_capabilities,
+        required_capabilities=[],
         specialist_ids=specialist_ids,
     )
-
-    _emit(event_queue, "_run_done_", {"run_id": result.run_id.value, "ok": True})
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Checkpoint helpers (non-fatal; failure logs a warning)
-# ---------------------------------------------------------------------------
-
-def _create_initial_checkpoint(
-    *,
-    run_id: str,
-    run_dir: str,
-    workspace_path: str,
-    task: Any,
-    specialist_ids: List[str],
-    task_force_mode: str,
-    model_cfg: ModelConfig,
-    routing_method: str,
-    required_capabilities: List[str],
-    plan: Optional[OrchestrationPlan],
-) -> Optional[Any]:
-    """Create and save the initial checkpoint. Returns the checkpoint object or None on error."""
-    try:
-        import time
-        from agentic_concierge.infrastructure.workspace.run_checkpoint import (
-            RunCheckpoint,
-            save_checkpoint,
-        )
-
-        orch_plan_dict = None
-        if plan is not None and plan.routing_method == "orchestrator":
-            orch_plan_dict = {
-                "assignments": [
-                    {"specialist_id": b.specialist_id, "brief": b.brief}
-                    for b in plan.specialist_assignments
-                ],
-                "mode": plan.mode,
-                "synthesis_required": plan.synthesis_required,
-                "reasoning": plan.reasoning,
-            }
-
-        checkpoint = RunCheckpoint(
-            run_id=run_id,
-            run_dir=run_dir,
-            workspace_path=workspace_path,
-            task_prompt=task.prompt,
-            specialist_ids=specialist_ids,
-            completed_specialists=[],
-            payloads={},
-            task_force_mode=task_force_mode,
-            model_key=task.model_key,
-            routing_method=routing_method,
-            required_capabilities=required_capabilities,
-            orchestration_plan=orch_plan_dict,
-            created_at=time.time(),
-            updated_at=time.time(),
-        )
-        save_checkpoint(run_dir, checkpoint)
-        return checkpoint
-    except Exception as exc:
-        logger.warning("Failed to create initial checkpoint: %s", exc)
-        return None
-
-
-def _update_checkpoint(
-    checkpoint: Optional[Any],
-    run_dir: str,
-    *,
-    completed: List[str],
-    payloads: Dict[str, Any],
-) -> None:
-    """Update the checkpoint's completed_specialists and payloads (non-fatal)."""
-    if checkpoint is None:
-        return
-    try:
-        import time
-        from agentic_concierge.infrastructure.workspace.run_checkpoint import save_checkpoint
-
-        checkpoint.completed_specialists = list(completed)
-        checkpoint.payloads = dict(payloads)
-        checkpoint.updated_at = time.time()
-        save_checkpoint(run_dir, checkpoint)
-    except Exception as exc:
-        logger.warning("Failed to update checkpoint: %s", exc)
-
-
-def _delete_run_checkpoint(run_dir: str) -> None:
-    """Delete the run checkpoint (non-fatal)."""
-    try:
-        from agentic_concierge.infrastructure.workspace.run_checkpoint import delete_checkpoint
-        delete_checkpoint(run_dir)
-    except Exception as exc:
-        logger.warning("Failed to delete checkpoint: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -1353,121 +1146,6 @@ async def _review_specialist_work(
     run_repository.append_event(run_id, "review_approved", _rev_ok, step=None)
     _emit(event_queue, "review_approved", _rev_ok)
     return True, comment
-
-
-# ---------------------------------------------------------------------------
-# Parallel task force helpers
-# ---------------------------------------------------------------------------
-
-async def _run_task_force_parallel(
-    *,
-    specialist_ids: List[str],
-    task: Any,
-    workspace_path: str,
-    model_cfg: ModelConfig,
-    chat_client: ChatClient,
-    run_repository: RunRepository,
-    run_id: RunId,
-    max_steps: int,
-    tracer: Any,
-    event_queue: Optional[asyncio.Queue],
-    specialist_registry: Any,
-    plan: Optional[OrchestrationPlan] = None,
-    available_models: Optional[List[str]] = None,
-    max_review_iterations: int = 0,
-    max_escalations: int = 0,
-    approval_channel: Optional[Any] = None,
-    config: Optional[Any] = None,
-) -> Dict[str, Any]:
-    """Run all specialist packs concurrently and merge their payloads."""
-
-    async def _run_one(specialist_id: str, pack_idx: int) -> Dict[str, Any]:
-        assignment = _get_assignment(plan, specialist_id)
-        pack = specialist_registry.get_pack(
-            specialist_id, workspace_path, task.network_allowed,
-            tools=assignment.tools if assignment else None,
-            role=assignment.role if assignment else None,
-            finish_schema_key=assignment.finish_schema if assignment else None,
-        )
-
-        # Per-specialist model selection (ADR-024)
-        spec_model_cfg, spec_chat_client = _select_specialist_model(
-            assignment, available_models or [], model_cfg, chat_client,
-        )
-
-        pack_start_ev = {"specialist_id": specialist_id, "pack_index": pack_idx}
-        run_repository.append_event(run_id, "pack_start", pack_start_ev, step=None)
-        _emit(event_queue, "pack_start", pack_start_ev)
-
-        user_content = f"Task:\n{task.prompt}"
-        brief_text = _get_brief(plan, specialist_id)
-        if brief_text:
-            user_content += f"\n\nYour specific assignment:\n{brief_text}"
-
-        messages: List[Dict[str, Any]] = [
-            {"role": "system", "content": pack.system_prompt},
-            {"role": "user", "content": user_content},
-        ]
-        step_prefix = f"{specialist_id}_"
-        return await _execute_pack_loop(
-            pack=pack,
-            messages=messages,
-            model_cfg=spec_model_cfg,
-            chat_client=spec_chat_client,
-            run_repository=run_repository,
-            run_id=run_id,
-            step_prefix=step_prefix,
-            max_steps=max_steps,
-            tracer=tracer,
-            specialist_id=specialist_id,
-            event_queue=event_queue,
-            available_models=available_models,
-            max_review_iterations=max_review_iterations,
-            max_escalations=max_escalations,
-            approval_channel=approval_channel,
-            delegation_depth=_MAX_DELEGATION_DEPTH,
-            specialist_registry=specialist_registry,
-            workspace_path=workspace_path,
-            config=config,
-            finish_schema_key=assignment.finish_schema if assignment else None,
-        )
-
-    results = await asyncio.gather(
-        *[_run_one(sid, idx) for idx, sid in enumerate(specialist_ids)],
-        return_exceptions=True,
-    )
-    return _merge_parallel_payloads(list(results), specialist_ids)
-
-
-def _merge_parallel_payloads(
-    payloads: List[Any],
-    specialist_ids: List[str],
-) -> Dict[str, Any]:
-    """Merge parallel pack payloads into a single combined result dict."""
-    pack_results: Dict[str, Any] = {}
-    summaries: List[str] = []
-
-    for sid, payload in zip(specialist_ids, payloads):
-        if isinstance(payload, BaseException):
-            pack_results[sid] = {
-                "error": str(payload),
-                "error_type": type(payload).__name__,
-            }
-            summaries.append(f"{sid}: error — {payload}")
-        else:
-            pack_results[sid] = payload
-            pack_summary = payload.get("summary") or payload.get("executive_summary") or ""
-            if pack_summary:
-                summaries.append(f"{sid}: {pack_summary}")
-
-    combined_summary = " | ".join(summaries) if summaries else "Parallel task force completed."
-    return {
-        "action": "final",
-        "pack_results": pack_results,
-        "summary": combined_summary,
-        "artifacts": [],
-        "next_steps": [],
-    }
 
 
 # ---------------------------------------------------------------------------
