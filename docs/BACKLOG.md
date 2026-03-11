@@ -14,7 +14,7 @@ referenced source files, and [DECISIONS.md](DECISIONS.md).
 **How to resume after an interruption**
 1. Read [STATE.md](STATE.md) — confirms current phase and last verified state.
 2. Read this file — find the first non-done item; that is what to work on.
-3. Run `make test` — confirm **1490 pass** before touching code.
+3. Run `make test` — confirm **1499 pass** before touching code.
 4. Start the item; mark it IN PROGRESS here and in STATE.md.
 
 ---

@@ -2,7 +2,7 @@
 
 **Purpose:** Single source of truth for “where we are” so any human or agent can resume work across restarts and sessions.
 
-**Last updated:** 2026-03-10. Fast CI: **1490 pass** (`make test`).
+**Last updated:** 2026-03-11. Fast CI: **1499 pass** (`make test`).
 Rust launcher: **27 tests pass** (`make test-rust`).
 Branch: `main`.
 

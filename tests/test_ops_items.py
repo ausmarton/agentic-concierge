@@ -219,16 +219,32 @@ class TestEnsureVllm:
 
     @pytest.mark.asyncio
     async def test_not_installed_returns_not_installed(self):
-        """When vllm is not importable, return NOT_INSTALLED."""
+        """When vllm is not importable and no container, return NOT_INSTALLED."""
         mgr = BackendManager()
         fs = _fs(Feature.VLLM, Feature.OLLAMA)
         config = _config(vllm_ensure_available=False)
         with (
             patch.object(mgr, "probe_vllm", return_value=_mock_vllm_unreachable()),
             patch("agentic_concierge.bootstrap.backend_manager._has_vllm", return_value=False),
+            patch("agentic_concierge.bootstrap.backend_manager._has_vllm_image", return_value=False),
         ):
             health = await mgr.ensure_vllm(config, fs)
         assert health.status == BackendStatus.NOT_INSTALLED
+
+    @pytest.mark.asyncio
+    async def test_container_available_reports_healthy(self):
+        """When vllm pip is unavailable but container image exists, report HEALTHY."""
+        mgr = BackendManager()
+        fs = _fs(Feature.VLLM, Feature.OLLAMA)
+        config = _config(vllm_ensure_available=False)
+        with (
+            patch.object(mgr, "probe_vllm", return_value=_mock_vllm_unreachable()),
+            patch("agentic_concierge.bootstrap.backend_manager._has_vllm", return_value=False),
+            patch("agentic_concierge.bootstrap.backend_manager._has_vllm_image", return_value=True),
+        ):
+            health = await mgr.ensure_vllm(config, fs)
+        assert health.status == BackendStatus.HEALTHY
+        assert "container" in health.hint.lower()
 
     @pytest.mark.asyncio
     async def test_no_model_returns_unreachable(self):

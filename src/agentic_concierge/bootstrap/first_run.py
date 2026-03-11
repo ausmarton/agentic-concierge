@@ -162,7 +162,8 @@ async def run(
                 health = await mgr.ensure_vllm(cfg, feature_set, install_if_missing=True)
                 if health.status == BackendStatus.HEALTHY:
                     if interactive:
-                        _print_status("[green]✓ vLLM is running[/green]")
+                        msg = health.hint or "vLLM is running"
+                        _print_status(f"[green]✓ {msg}[/green]")
                 elif health.status != BackendStatus.DISABLED:
                     logger.info("vLLM not available: %s", health.hint or health.error)
                     if interactive:

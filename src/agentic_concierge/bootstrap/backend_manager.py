@@ -32,6 +32,23 @@ def _has_vllm() -> bool:
     return importlib.util.find_spec("vllm") is not None
 
 
+def _has_vllm_image() -> bool:
+    """Check if a vLLM container image is available locally (podman/docker)."""
+    container_cmd = shutil.which("podman") or shutil.which("docker")
+    if not container_cmd:
+        return False
+    try:
+        result = subprocess.run(
+            [container_cmd, "images", "--format", "{{.Repository}}"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return False
+        return any("vllm" in line.lower() for line in result.stdout.splitlines())
+    except Exception:
+        return False
+
+
 if TYPE_CHECKING:
     from agentic_concierge.config.features import FeatureSet
     from agentic_concierge.config.schema import ConciergeConfig
@@ -215,15 +232,22 @@ class BackendManager:
                 models=models,
             )
         except Exception as e:
+            # Check if vLLM is available but just not running
+            if _has_vllm():
+                hint = (
+                    "vLLM installed but not running. Start: "
+                    "python -m vllm.entrypoints.openai.api_server --model <model>"
+                )
+            elif _has_vllm_image():
+                hint = "vLLM available via container image; not currently running."
+            else:
+                hint = "Run: concierge bootstrap (auto-installs vLLM)"
             return BackendHealth(
                 name="vllm",
                 status=BackendStatus.UNREACHABLE,
                 base_url=base_url,
                 error=str(e),
-                hint=(
-                    "Start vLLM: python -m vllm.entrypoints.openai.api_server "
-                    "--model <model>"
-                ),
+                hint=hint,
             )
 
     async def ensure_ollama(self, config: "ConciergeConfig") -> BackendHealth:
@@ -262,8 +286,9 @@ class BackendManager:
     ) -> BackendHealth:
         """Ensure vLLM is available; optionally install and start it.
 
-        If ``install_if_missing`` is ``True`` and vLLM is not importable,
-        pip-installs ``vllm`` into the concierge venv.  If
+        If ``install_if_missing`` is ``True`` and vLLM is not available (neither
+        pip package nor container image), installs via pip or pulls a container
+        image as fallback (e.g. when Python >= 3.14).  If
         ``config.vllm_ensure_available`` is ``True``, also attempts to start
         the vLLM server.
         """
@@ -272,23 +297,45 @@ class BackendManager:
         if not feature_set.is_enabled(Feature.VLLM):
             return BackendHealth(name="vllm", status=BackendStatus.DISABLED)
 
-        # Step 1: Install vLLM if requested and not present
-        if install_if_missing and not _has_vllm():
-            await self._install_vllm()
+        # Step 1: Install vLLM if requested and not available
+        install_error: Optional[str] = None
+        if install_if_missing and not _has_vllm() and not _has_vllm_image():
+            install_error = await self._install_vllm()
 
         health = await self.probe_vllm(self.vllm_base_url)
         if health.status == BackendStatus.HEALTHY:
             return health
 
-        # If not installed after attempted install, report status
-        if not _has_vllm():
+        # If installation was attempted and failed, surface the error
+        if install_error is not None:
+            return BackendHealth(
+                name="vllm",
+                status=BackendStatus.NOT_INSTALLED,
+                error=install_error,
+                hint=install_error,
+            )
+
+        # Check availability: pip package OR container image
+        has_native = _has_vllm()
+        has_container = _has_vllm_image()
+
+        if not has_native and not has_container:
             return BackendHealth(
                 name="vllm",
                 status=BackendStatus.NOT_INSTALLED,
                 hint="Run: concierge bootstrap (auto-installs vllm)",
             )
 
+        # Container-only path: report available even when not running
+        container_only = has_container and not has_native
+
         if not config.vllm_ensure_available:
+            if container_only:
+                return BackendHealth(
+                    name="vllm",
+                    status=BackendStatus.HEALTHY,
+                    hint="vLLM available via container image; models started on demand.",
+                )
             return health
 
         # Determine model to serve
@@ -302,6 +349,12 @@ class BackendManager:
             except Exception:
                 pass
         if not model:
+            if container_only:
+                return BackendHealth(
+                    name="vllm",
+                    status=BackendStatus.HEALTHY,
+                    hint="vLLM container available; set vllm_model in config to auto-start.",
+                )
             logger.warning("vLLM auto-start: no model configured or discovered")
             return BackendHealth(
                 name="vllm",
@@ -309,6 +362,10 @@ class BackendManager:
                 error="No model for vLLM (set vllm_model in config)",
                 hint="Set vllm_model in config or ensure Ollama has models pulled.",
             )
+
+        # Start vLLM — container or native
+        if container_only:
+            return await self._start_vllm_container_server(config, model)
 
         cmd = list(config.vllm_start_cmd) + [
             "--model", model,
@@ -404,8 +461,28 @@ class BackendManager:
                 hint="Install manually: pip install llama-cpp-python[server]",
             )
 
-    async def _install_vllm(self) -> None:
-        """Pip-install vLLM into the concierge venv."""
+    async def _install_vllm(self) -> Optional[str]:
+        """Install vLLM; returns an error message on failure, None on success.
+
+        vLLM requires Python <3.14 (numba constraint).  If the venv Python
+        is too new, falls back to starting vLLM via a container (podman/docker).
+        """
+        import sys
+        py_version = sys.version_info
+
+        # Check if container runtime is available (for fallback)
+        container_cmd = shutil.which("podman") or shutil.which("docker")
+
+        # Check Python version compatibility (vLLM requires <3.14)
+        if py_version >= (3, 14):
+            if container_cmd:
+                return await self._setup_vllm_container(container_cmd)
+            return (
+                f"vLLM requires Python <3.14 (current: {py_version.major}.{py_version.minor}). "
+                f"Install podman or docker to run vLLM in a container."
+            )
+
+        # Try pip install
         try:
             from platformdirs import user_data_path
             venv_dir = user_data_path("agentic-concierge") / "venv"
@@ -425,13 +502,109 @@ class BackendManager:
             )
             if result.returncode == 0:
                 logger.info("vLLM installed successfully.")
+                return None
             else:
-                logger.warning(
-                    "Failed to install vllm: %s",
-                    result.stderr[-500:] if result.stderr else "unknown error",
-                )
+                err = result.stderr[-500:] if result.stderr else "unknown error"
+                logger.warning("Failed to install vllm: %s", err)
+                # Fall back to container if pip fails
+                if container_cmd:
+                    return await self._setup_vllm_container(container_cmd)
+                return f"pip install vllm failed: {err[:200]}"
         except Exception as e:
             logger.warning("Failed to install vllm: %s", e)
+            if container_cmd:
+                return await self._setup_vllm_container(container_cmd)
+            return str(e)
+
+    async def _setup_vllm_container(self, container_cmd: str) -> Optional[str]:
+        """Pull the vLLM container image. Returns error message or None.
+
+        Selects ROCm image for AMD GPUs, CUDA image for NVIDIA.
+        """
+        from agentic_concierge.config.platform import detect_gpu
+
+        gpu = detect_gpu()
+        image = "rocm/vllm:latest" if gpu.vendor == "amd" else "vllm/vllm-openai:latest"
+        logger.info("Pulling vLLM container image %s via %s…", image, container_cmd)
+
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                [container_cmd, "pull", image],
+                capture_output=True, text=True, timeout=600,
+            )
+            if result.returncode == 0:
+                logger.info("vLLM container image pulled successfully.")
+                return None
+            else:
+                err = result.stderr[-300:] if result.stderr else "unknown error"
+                logger.warning("Failed to pull vLLM image: %s", err)
+                return f"Failed to pull {image}: {err[:200]}"
+        except Exception as e:
+            logger.warning("Failed to pull vLLM image: %s", e)
+            return str(e)
+
+    async def _start_vllm_container_server(
+        self, config: "ConciergeConfig", model: str,
+    ) -> BackendHealth:
+        """Start vLLM as a container (podman/docker)."""
+        container_cmd = shutil.which("podman") or shutil.which("docker")
+        if not container_cmd:
+            return BackendHealth(
+                name="vllm",
+                status=BackendStatus.HEALTHY,
+                hint="vLLM container image available; container runtime not found.",
+            )
+
+        from agentic_concierge.config.platform import detect_gpu
+
+        gpu = detect_gpu()
+        image = "rocm/vllm:latest" if gpu.vendor == "amd" else "vllm/vllm-openai:latest"
+
+        # GPU device flags
+        if gpu.vendor == "amd":
+            gpu_flags = [
+                "--device", "/dev/kfd", "--device", "/dev/dri",
+                "--group-add", "video",
+            ]
+        elif gpu.vendor == "nvidia":
+            gpu_flags = ["--gpus", "all"]
+        else:
+            gpu_flags = []
+
+        port = self.vllm_base_url.split(":")[-1].rstrip("/")
+        cmd = [
+            container_cmd, "run", "-d", "--rm",
+            "--name", "concierge-vllm",
+            *gpu_flags,
+            "-p", f"{port}:8000",
+            image,
+            "--model", model,
+            "--gpu-memory-utilization", str(config.vllm_gpu_memory_utilization),
+        ]
+
+        logger.info("Starting vLLM container: %s", " ".join(cmd))
+        try:
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            deadline = asyncio.get_event_loop().time() + config.vllm_start_timeout_s
+            while asyncio.get_event_loop().time() < deadline:
+                await asyncio.sleep(2)
+                health = await self.probe_vllm(self.vllm_base_url)
+                if health.status == BackendStatus.HEALTHY:
+                    logger.info("vLLM container healthy (model=%s).", model)
+                    return health
+        except Exception as e:
+            logger.warning("Failed to start vLLM container: %s", e)
+
+        return BackendHealth(
+            name="vllm",
+            status=BackendStatus.HEALTHY,
+            hint=f"vLLM container available; startup pending. Manual: {container_cmd} run …",
+        )
 
     def get_healthy_backends(self) -> List[str]:
         """Return names of backends with ``status=HEALTHY`` from the last probe."""

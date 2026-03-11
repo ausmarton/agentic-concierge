@@ -100,12 +100,28 @@ async def test_probe_vllm_healthy():
 @pytest.mark.asyncio
 async def test_probe_vllm_unreachable():
     mgr = BackendManager()
-    with patch(
-        "httpx.AsyncClient.__aenter__",
-        side_effect=httpx.ConnectError("refused"),
+    with (
+        patch("httpx.AsyncClient.__aenter__", side_effect=httpx.ConnectError("refused")),
+        patch("agentic_concierge.bootstrap.backend_manager._has_vllm", return_value=False),
+        patch("agentic_concierge.bootstrap.backend_manager._has_vllm_image", return_value=False),
     ):
         health = await mgr.probe_vllm("http://localhost:8000")
     assert health.status == BackendStatus.UNREACHABLE
+    assert "bootstrap" in health.hint.lower()
+
+
+@pytest.mark.asyncio
+async def test_probe_vllm_unreachable_but_container_available():
+    """When HTTP probe fails but container image exists, hint mentions container."""
+    mgr = BackendManager()
+    with (
+        patch("httpx.AsyncClient.__aenter__", side_effect=httpx.ConnectError("refused")),
+        patch("agentic_concierge.bootstrap.backend_manager._has_vllm", return_value=False),
+        patch("agentic_concierge.bootstrap.backend_manager._has_vllm_image", return_value=True),
+    ):
+        health = await mgr.probe_vllm("http://localhost:8000")
+    assert health.status == BackendStatus.UNREACHABLE
+    assert "container" in health.hint.lower()
 
 
 # ---------------------------------------------------------------------------
