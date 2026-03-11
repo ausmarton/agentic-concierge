@@ -159,7 +159,7 @@ async def run(
             _print_status("Ensuring vLLM is available…")
         if cfg is not None:
             try:
-                health = await mgr.ensure_vllm(cfg, feature_set)
+                health = await mgr.ensure_vllm(cfg, feature_set, install_if_missing=True)
                 if health.status == BackendStatus.HEALTHY:
                     if interactive:
                         _print_status("[green]✓ vLLM is running[/green]")

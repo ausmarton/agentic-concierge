@@ -122,10 +122,25 @@ def test_probe_llama_cpp_installed():
 
 def test_probe_llama_cpp_not_installed():
     mgr = BackendManager()
-    with patch("shutil.which", return_value=None):
+    with (
+        patch("shutil.which", return_value=None),
+        patch("agentic_concierge.bootstrap.backend_manager._has_llama_cpp_python", return_value=False),
+    ):
         health = mgr.probe_llama_cpp()
     assert health.status == BackendStatus.NOT_INSTALLED
-    assert "llama.cpp" in health.hint
+    assert "bootstrap" in health.hint.lower()
+
+
+def test_probe_llama_cpp_python_package_only():
+    """When llama-server binary is missing but Python package is installed, report healthy."""
+    mgr = BackendManager()
+    with (
+        patch("shutil.which", return_value=None),
+        patch("agentic_concierge.bootstrap.backend_manager._has_llama_cpp_python", return_value=True),
+    ):
+        health = mgr.probe_llama_cpp()
+    assert health.status == BackendStatus.HEALTHY
+    assert "python" in health.hint.lower()
 
 
 # ---------------------------------------------------------------------------

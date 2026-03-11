@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -17,6 +18,19 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 import httpx
 
 logger = logging.getLogger(__name__)
+
+
+def _has_llama_cpp_python() -> bool:
+    """Check if llama-cpp-python is importable (without importing it)."""
+    import importlib.util
+    return importlib.util.find_spec("llama_cpp") is not None
+
+
+def _has_vllm() -> bool:
+    """Check if vLLM is importable (without importing it)."""
+    import importlib.util
+    return importlib.util.find_spec("vllm") is not None
+
 
 if TYPE_CHECKING:
     from agentic_concierge.config.features import FeatureSet
@@ -140,19 +154,23 @@ class BackendManager:
             )
 
     def probe_llama_cpp(self) -> BackendHealth:
-        """Check if llama-server is installed and if any managed processes are running."""
+        """Check if llama-server is available (binary or Python package)."""
         binary = shutil.which("llama-server")
-        if binary is None:
+        has_python_pkg = _has_llama_cpp_python()
+
+        if binary is None and not has_python_pkg:
             return BackendHealth(
                 name="llama_cpp",
                 status=BackendStatus.NOT_INSTALLED,
-                hint="Install llama.cpp: https://github.com/ggerganov/llama.cpp#build",
+                hint="Run: concierge bootstrap (auto-installs llama-cpp-python[server])",
             )
-        # llama-server is installed; check if any managed instances are running
-        # by probing the port range used by LlamaCppBackend.
+
+        mode = "binary" if binary else "python -m llama_cpp.server"
+
+        # Check if any managed instances are running
         import socket
         running_ports: list[int] = []
-        for port in range(8100, 8110):  # check first 10 ports in the range
+        for port in range(8100, 8110):
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.settimeout(0.1)
                 if s.connect_ex(("127.0.0.1", port)) == 0:
@@ -161,12 +179,12 @@ class BackendManager:
             return BackendHealth(
                 name="llama_cpp",
                 status=BackendStatus.HEALTHY,
-                hint=f"llama-server running on port(s): {running_ports}",
+                hint=f"llama-server running on port(s): {running_ports} (via {mode})",
             )
         return BackendHealth(
             name="llama_cpp",
             status=BackendStatus.HEALTHY,
-            hint="llama-server installed; models started on demand.",
+            hint=f"llama-server available ({mode}); models started on demand.",
         )
 
     async def probe_vllm(self, base_url: str) -> BackendHealth:
@@ -240,24 +258,35 @@ class BackendManager:
         self,
         config: "ConciergeConfig",
         feature_set: "FeatureSet",
+        install_if_missing: bool = False,
     ) -> BackendHealth:
-        """Ensure vLLM is running; attempt to start it if configured.
+        """Ensure vLLM is available; optionally install and start it.
 
-        Mirrors ``ensure_ollama()`` but requires ``Feature.VLLM`` in the feature
-        set and ``config.vllm_ensure_available`` to be ``True``.
-
-        If vLLM is already healthy, returns immediately.  Otherwise, builds a
-        start command from config fields and polls ``/health`` until ready or
-        timeout.
+        If ``install_if_missing`` is ``True`` and vLLM is not importable,
+        pip-installs ``vllm`` into the concierge venv.  If
+        ``config.vllm_ensure_available`` is ``True``, also attempts to start
+        the vLLM server.
         """
         from agentic_concierge.config.features import Feature
 
         if not feature_set.is_enabled(Feature.VLLM):
             return BackendHealth(name="vllm", status=BackendStatus.DISABLED)
 
+        # Step 1: Install vLLM if requested and not present
+        if install_if_missing and not _has_vllm():
+            await self._install_vllm()
+
         health = await self.probe_vllm(self.vllm_base_url)
         if health.status == BackendStatus.HEALTHY:
             return health
+
+        # If not installed after attempted install, report status
+        if not _has_vllm():
+            return BackendHealth(
+                name="vllm",
+                status=BackendStatus.NOT_INSTALLED,
+                hint="Run: concierge bootstrap (auto-installs vllm)",
+            )
 
         if not config.vllm_ensure_available:
             return health
@@ -311,35 +340,36 @@ class BackendManager:
         self,
         venv_pip: Optional[str] = None,
     ) -> BackendHealth:
-        """Ensure llama-server is installed; pip-install if missing.
+        """Ensure llama-server is available; pip-install llama-cpp-python if missing.
 
-        If ``llama-server`` is not on PATH, installs ``llama-cpp-python[server]``
-        into the concierge venv.  This provides ``llama-server`` with Vulkan
-        support (the default CMake build), suitable for AMD APUs and other
-        hardware without CUDA.
+        Checks for the ``llama-server`` binary first, then for the
+        ``llama-cpp-python`` Python package (which provides
+        ``python -m llama_cpp.server``).  If neither is found, installs
+        ``llama-cpp-python[server]`` into the concierge venv.
 
         Args:
             venv_pip: Path to the venv's ``pip`` binary.  If ``None``,
                 attempts to discover it from ``platformdirs``.
         """
-        binary = shutil.which("llama-server")
-        if binary is not None:
+        # Already available — either binary or Python package
+        if shutil.which("llama-server") is not None or _has_llama_cpp_python():
             return self.probe_llama_cpp()
 
-        # Find the venv pip if not provided
+        # Find the venv pip/python if not provided
         if venv_pip is None:
             try:
                 from platformdirs import user_data_path
                 venv_dir = user_data_path("agentic-concierge") / "venv"
-                venv_pip = str(venv_dir / "bin" / "pip")
-                if not shutil.which(venv_pip):
-                    venv_pip = str(venv_dir / "bin" / "python")
+                venv_python = str(venv_dir / "bin" / "python")
+                if os.path.isfile(venv_python):
+                    venv_pip = venv_python
+                else:
+                    venv_pip = str(venv_dir / "bin" / "pip")
             except Exception:
                 venv_pip = "pip"
 
         logger.info("llama-server not found; installing llama-cpp-python[server]…")
         try:
-            # Use pip to install llama-cpp-python with server extras
             if venv_pip.endswith("python"):
                 cmd = [venv_pip, "-m", "pip", "install", "llama-cpp-python[server]"]
             else:
@@ -373,6 +403,35 @@ class BackendManager:
                 error=str(e),
                 hint="Install manually: pip install llama-cpp-python[server]",
             )
+
+    async def _install_vllm(self) -> None:
+        """Pip-install vLLM into the concierge venv."""
+        try:
+            from platformdirs import user_data_path
+            venv_dir = user_data_path("agentic-concierge") / "venv"
+            venv_python = str(venv_dir / "bin" / "python")
+            if not os.path.isfile(venv_python):
+                venv_python = "python"
+        except Exception:
+            venv_python = "python"
+
+        logger.info("vLLM not found; installing vllm…")
+        cmd = [venv_python, "-m", "pip", "install", "vllm"]
+
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run, cmd,
+                capture_output=True, text=True, timeout=600,
+            )
+            if result.returncode == 0:
+                logger.info("vLLM installed successfully.")
+            else:
+                logger.warning(
+                    "Failed to install vllm: %s",
+                    result.stderr[-500:] if result.stderr else "unknown error",
+                )
+        except Exception as e:
+            logger.warning("Failed to install vllm: %s", e)
 
     def get_healthy_backends(self) -> List[str]:
         """Return names of backends with ``status=HEALTHY`` from the last probe."""

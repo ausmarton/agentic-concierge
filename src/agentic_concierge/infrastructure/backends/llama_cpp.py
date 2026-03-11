@@ -104,8 +104,12 @@ class LlamaCppBackend:
     # -------------------------------------------------------------------
 
     async def health_check(self) -> bool:
-        """Check if the ``llama-server`` binary is available."""
-        return shutil.which(self._binary) is not None
+        """Check if llama-server is available (binary or Python package)."""
+        if shutil.which(self._binary) is not None:
+            return True
+        # Fallback: check for llama-cpp-python (provides python -m llama_cpp.server)
+        import importlib.util
+        return importlib.util.find_spec("llama_cpp") is not None
 
     # -------------------------------------------------------------------
     # Model discovery
@@ -163,27 +167,41 @@ class LlamaCppBackend:
                     metadata={"port": proc.port, "pid": proc.process.pid},
                 )
 
-        binary_path = shutil.which(self._binary)
-        if binary_path is None:
-            raise RuntimeError(
-                f"llama-server binary {self._binary!r} not found in PATH"
-            )
-
         model_path = self._resolve_model_path(model_id)
         port = self._allocate_port()
 
         # KV cache size = ctx_size_per_slot * parallel_slots
         total_ctx = self._ctx_size * self._parallel
-        cmd = [
-            binary_path,
-            "--model", model_path,
-            "--port", str(port),
-            "--host", "127.0.0.1",
-            "--ctx-size", str(total_ctx),
-            "--parallel", str(self._parallel),
-        ]
+
+        binary_path = shutil.which(self._binary)
+        if binary_path is not None:
+            cmd = [
+                binary_path,
+                "--model", model_path,
+                "--port", str(port),
+                "--host", "127.0.0.1",
+                "--ctx-size", str(total_ctx),
+                "--parallel", str(self._parallel),
+            ]
+        else:
+            # Fallback to Python package (llama-cpp-python[server])
+            import importlib.util
+            if importlib.util.find_spec("llama_cpp") is None:
+                raise RuntimeError(
+                    "llama-server binary not found and llama-cpp-python not installed"
+                )
+            import sys
+            cmd = [
+                sys.executable, "-m", "llama_cpp.server",
+                "--model", model_path,
+                "--port", str(port),
+                "--host", "127.0.0.1",
+                "--n_ctx", str(total_ctx),
+            ]
+
         if self._n_gpu_layers != 0:
-            cmd.extend(["--n-gpu-layers", str(self._n_gpu_layers)])
+            flag = "--n-gpu-layers" if binary_path else "--n_gpu_layers"
+            cmd.extend([flag, str(self._n_gpu_layers)])
         cmd.extend(self._extra_args)
 
         logger.info(

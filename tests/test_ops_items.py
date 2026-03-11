@@ -206,13 +206,29 @@ class TestEnsureVllm:
 
     @pytest.mark.asyncio
     async def test_not_configured_returns_unreachable(self):
-        """When vllm_ensure_available=False, don't try to start."""
+        """When vllm_ensure_available=False and vllm is installed, don't try to start."""
         mgr = BackendManager()
         fs = _fs(Feature.VLLM, Feature.OLLAMA)
         config = _config(vllm_ensure_available=False)
-        with patch.object(mgr, "probe_vllm", return_value=_mock_vllm_unreachable()):
+        with (
+            patch.object(mgr, "probe_vllm", return_value=_mock_vllm_unreachable()),
+            patch("agentic_concierge.bootstrap.backend_manager._has_vllm", return_value=True),
+        ):
             health = await mgr.ensure_vllm(config, fs)
         assert health.status == BackendStatus.UNREACHABLE
+
+    @pytest.mark.asyncio
+    async def test_not_installed_returns_not_installed(self):
+        """When vllm is not importable, return NOT_INSTALLED."""
+        mgr = BackendManager()
+        fs = _fs(Feature.VLLM, Feature.OLLAMA)
+        config = _config(vllm_ensure_available=False)
+        with (
+            patch.object(mgr, "probe_vllm", return_value=_mock_vllm_unreachable()),
+            patch("agentic_concierge.bootstrap.backend_manager._has_vllm", return_value=False),
+        ):
+            health = await mgr.ensure_vllm(config, fs)
+        assert health.status == BackendStatus.NOT_INSTALLED
 
     @pytest.mark.asyncio
     async def test_no_model_returns_unreachable(self):
@@ -226,6 +242,7 @@ class TestEnsureVllm:
         with (
             patch.object(mgr, "probe_vllm", return_value=_mock_vllm_unreachable()),
             patch.object(mgr, "probe_ollama", return_value=ollama_empty),
+            patch("agentic_concierge.bootstrap.backend_manager._has_vllm", return_value=True),
         ):
             health = await mgr.ensure_vllm(config, fs)
         assert health.status == BackendStatus.UNREACHABLE
@@ -248,6 +265,7 @@ class TestEnsureVllm:
             patch.object(mgr, "probe_vllm", side_effect=probe_results),
             patch.object(mgr, "probe_ollama", return_value=_mock_ollama_with_models()),
             patch("subprocess.Popen") as mock_popen,
+            patch("agentic_concierge.bootstrap.backend_manager._has_vllm", return_value=True),
         ):
             health = await mgr.ensure_vllm(config, fs)
 
@@ -273,6 +291,7 @@ class TestEnsureVllm:
                 _mock_vllm_unreachable(), _mock_vllm_healthy(),
             ]),
             patch("subprocess.Popen") as mock_popen,
+            patch("agentic_concierge.bootstrap.backend_manager._has_vllm", return_value=True),
         ):
             health = await mgr.ensure_vllm(config, fs)
 
@@ -297,6 +316,7 @@ class TestEnsureVllm:
                 _mock_vllm_unreachable(), _mock_vllm_healthy(),
             ]),
             patch("subprocess.Popen") as mock_popen,
+            patch("agentic_concierge.bootstrap.backend_manager._has_vllm", return_value=True),
         ):
             await mgr.ensure_vllm(config, fs)
 
@@ -317,6 +337,7 @@ class TestEnsureVllm:
         with (
             patch.object(mgr, "probe_vllm", return_value=_mock_vllm_unreachable()),
             patch("subprocess.Popen"),
+            patch("agentic_concierge.bootstrap.backend_manager._has_vllm", return_value=True),
         ):
             health = await mgr.ensure_vllm(config, fs)
 

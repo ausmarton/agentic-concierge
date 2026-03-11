@@ -202,8 +202,11 @@ class TestLoadModel:
         (tmp_path / "test.gguf").touch()
         backend = LlamaCppBackend(model_dir=str(tmp_path))
 
-        with patch("shutil.which", return_value=None):
-            with pytest.raises(RuntimeError, match="not found in PATH"):
+        with (
+            patch("shutil.which", return_value=None),
+            patch("importlib.util.find_spec", return_value=None),
+        ):
+            with pytest.raises(RuntimeError, match="not found.*not installed"):
                 await backend.load_model("test.gguf")
 
     @pytest.mark.asyncio
