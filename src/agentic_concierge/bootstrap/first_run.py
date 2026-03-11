@@ -53,20 +53,22 @@ async def run(
     from agentic_concierge.bootstrap.model_advisor import SystemProfile, advise_profile
     from agentic_concierge.config.features import ProfileTier
 
-    # 1. Return cached profile if detected.json exists and not forced
+    # 1. Check for cached profile
+    cached_profile: Optional["SystemProfile"] = None
     if not force_profile and not is_first_run(path=detected_override):
-        cached = load_detected(path=detected_override)
-        if cached is not None:
-            logger.debug("Bootstrap: cached profile %s loaded.", cached.tier.value)
-            return cached
+        cached_profile = load_detected(path=detected_override)
+        if cached_profile is not None:
+            logger.debug("Bootstrap: cached profile %s loaded.", cached_profile.tier.value)
 
-    # 2. Probe system
-    if interactive:
+    # 2. Probe system (always needed for backend ensure steps)
+    if interactive and cached_profile is None:
         _print_status("Probing system resources…")
     probe = await probe_system()
 
-    # 3. Advise profile (or use forced override)
-    if force_profile:
+    # 3. Advise profile (or use forced override, or cached)
+    if cached_profile is not None:
+        profile = cached_profile
+    elif force_profile:
         try:
             tier = ProfileTier(force_profile.lower())
         except ValueError:
@@ -98,11 +100,11 @@ async def run(
     else:
         profile = advise_profile(probe)
 
-    # 4. Show summary
-    if interactive:
+    # 4. Show summary (skip for cached profiles)
+    if interactive and cached_profile is None:
         _print_profile_panel(probe, profile)
 
-    # 5. Ensure backends enabled for this profile
+    # 5. Ensure backends enabled for this profile (ALWAYS runs, even for cached profiles)
     from agentic_concierge.config.features import PROFILE_FEATURES, Feature, FeatureSet
     profile_features = PROFILE_FEATURES.get(profile.tier, frozenset())
     feature_set = FeatureSet(profile_features)

@@ -451,6 +451,7 @@ def doctor(
     backend_table.add_column("Status")
     backend_table.add_column("Models")
     backend_table.add_column("Hint", overflow="fold")
+    any_unhealthy = False
     for name, h in health_map.items():
         if h.status == BackendStatus.HEALTHY:
             status_str = "[green]● healthy[/green]"
@@ -459,10 +460,15 @@ def doctor(
         else:
             err = f" ({h.error})" if verbose and h.error else ""
             status_str = f"[red]✗ {h.status.value}[/red]{err}"
+            any_unhealthy = True
         models_str = ", ".join(h.models[:3]) or "—"
         hint = h.hint or "—"
         backend_table.add_row(name, status_str, models_str, hint)
     console.print(backend_table)
+    if any_unhealthy:
+        console.print(
+            "[dim]Tip: run [bold]concierge bootstrap[/bold] to auto-install missing backends.[/dim]"
+        )
 
     # Tools & extras: browser (Playwright) and vector store (ChromaDB)
     import importlib.util as _ilu

@@ -95,16 +95,26 @@ def test_round_trip_all_tiers(tmp_path):
 
 @pytest.mark.asyncio
 async def test_first_run_returns_cached_profile(tmp_path):
-    """If detected.json exists and no force, return cached without probing."""
+    """If detected.json exists and no force, return cached profile (still probes for backend ensure)."""
     saved = _sample_profile(ProfileTier.MEDIUM)
     p = tmp_path / "detected.json"
     save_detected(saved, path=p)
 
     from agentic_concierge.bootstrap import first_run
-    with patch("agentic_concierge.bootstrap.first_run.probe_system") as mock_probe:
+    from agentic_concierge.bootstrap.system_probe import SystemProbe
+
+    fake_probe = SystemProbe(
+        cpu_cores=8, cpu_arch="x86_64",
+        ram_total_mb=8 * 1024, ram_available_mb=4 * 1024,
+    )
+    with (
+        patch("agentic_concierge.bootstrap.first_run.probe_system", return_value=fake_probe) as mock_probe,
+        patch("subprocess.run", side_effect=FileNotFoundError),
+    ):
         result = await first_run.run(interactive=False, detected_override=p)
 
-    mock_probe.assert_not_called()
+    # Probe is called (needed for backend ensure steps) but cached profile is used
+    mock_probe.assert_called_once()
     assert result.tier == ProfileTier.MEDIUM
 
 
