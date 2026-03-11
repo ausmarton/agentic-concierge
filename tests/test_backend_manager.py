@@ -111,8 +111,8 @@ async def test_probe_vllm_unreachable():
 
 
 @pytest.mark.asyncio
-async def test_probe_vllm_unreachable_but_container_available():
-    """When HTTP probe fails but container image exists, hint mentions container."""
+async def test_probe_vllm_container_available_reports_healthy():
+    """When HTTP probe fails but container image exists, report HEALTHY (on-demand)."""
     mgr = BackendManager()
     with (
         patch("httpx.AsyncClient.__aenter__", side_effect=httpx.ConnectError("refused")),
@@ -120,8 +120,22 @@ async def test_probe_vllm_unreachable_but_container_available():
         patch("agentic_concierge.bootstrap.backend_manager._has_vllm_image", return_value=True),
     ):
         health = await mgr.probe_vllm("http://localhost:8000")
-    assert health.status == BackendStatus.UNREACHABLE
+    assert health.status == BackendStatus.HEALTHY
     assert "container" in health.hint.lower()
+    assert "on demand" in health.hint.lower()
+
+
+@pytest.mark.asyncio
+async def test_probe_vllm_pip_available_reports_healthy():
+    """When HTTP probe fails but vllm pip package exists, report HEALTHY."""
+    mgr = BackendManager()
+    with (
+        patch("httpx.AsyncClient.__aenter__", side_effect=httpx.ConnectError("refused")),
+        patch("agentic_concierge.bootstrap.backend_manager._has_vllm", return_value=True),
+    ):
+        health = await mgr.probe_vllm("http://localhost:8000")
+    assert health.status == BackendStatus.HEALTHY
+    assert "on demand" in health.hint.lower()
 
 
 # ---------------------------------------------------------------------------

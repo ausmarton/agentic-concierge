@@ -235,21 +235,28 @@ class BackendManager:
             )
         except Exception as e:
             # Check if vLLM is available but just not running
+            # (consistent with llama_cpp: "installed → healthy, started on demand")
             if _has_vllm():
-                hint = (
-                    "vLLM installed but not running. Start: "
-                    "python -m vllm.entrypoints.openai.api_server --model <model>"
+                return BackendHealth(
+                    name="vllm",
+                    status=BackendStatus.HEALTHY,
+                    hint=(
+                        "vLLM installed (pip); not currently running. "
+                        "Models started on demand."
+                    ),
                 )
-            elif _has_vllm_image():
-                hint = "vLLM available via container image; not currently running."
-            else:
-                hint = "Run: concierge bootstrap (auto-installs vLLM)"
+            if _has_vllm_image():
+                return BackendHealth(
+                    name="vllm",
+                    status=BackendStatus.HEALTHY,
+                    hint="vLLM available (container image); models started on demand.",
+                )
             return BackendHealth(
                 name="vllm",
                 status=BackendStatus.UNREACHABLE,
                 base_url=base_url,
                 error=str(e),
-                hint=hint,
+                hint="Run: concierge bootstrap (auto-installs vLLM)",
             )
 
     async def ensure_ollama(self, config: "ConciergeConfig") -> BackendHealth:
