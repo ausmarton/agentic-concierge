@@ -43,8 +43,10 @@ def _clean_caches():
     os.environ.pop("CONCIERGE_PLATFORM", None)
     os.environ.pop("CONCIERGE_PLATFORM_PATH", None)
     os.environ.pop("XDG_CONFIG_HOME", None)
-    os.environ.pop("OLLAMA_VULKAN", None)
-    os.environ.pop("HIP_VISIBLE_DEVICES", None)
+    # Clean up any env vars set by apply_backend_env tests
+    for k in ("OLLAMA_VULKAN", "HIP_VISIBLE_DEVICES", "MY_BACKEND_VAR",
+              "EXTRA_VAR", "ANOTHER_VAR"):
+        os.environ.pop(k, None)
     reload_profiles()
 
 
@@ -272,12 +274,14 @@ class TestShippedProfiles:
 
     def test_strix_halo_env_vars(self):
         p = platform_profiles()["strix-halo"]
-        assert p.backend_env["OLLAMA_VULKAN"] == "1"
-        assert p.backend_env["HIP_VISIBLE_DEVICES"] == "-1"
+        # ROCm 7.2+ supported; no env var overrides needed
+        assert p.backend_env == {}
 
     def test_strix_halo_backends(self):
         p = platform_profiles()["strix-halo"]
+        assert "vllm" in p.preferred_backends
         assert "ollama" in p.preferred_backends
+        assert "llama_cpp" in p.preferred_backends
 
     def test_apple_silicon_no_env_vars(self):
         p = platform_profiles()["apple-silicon"]
@@ -308,7 +312,7 @@ class TestDetectPlatform:
         gpu = GPUInfo(vendor="amd", arch="RDNA3.5")
         profile = detect_platform(gpu=gpu)
         assert profile.name == "strix-halo"
-        assert profile.backend_env["OLLAMA_VULKAN"] == "1"
+        assert "vllm" in profile.preferred_backends
 
     def test_auto_detect_apple(self):
         gpu = GPUInfo(vendor="apple")
@@ -404,7 +408,7 @@ class TestUserOverride:
         override = {
             "profiles": {
                 "strix-halo": {
-                    "backend_env": {"OLLAMA_VULKAN": "1", "HIP_VISIBLE_DEVICES": "-1", "EXTRA_VAR": "yes"},
+                    "backend_env": {"EXTRA_VAR": "yes", "ANOTHER_VAR": "42"},
                     "preferred_backends": ["ollama"],
                     "notes": "Override with extra var",
                 },
@@ -416,8 +420,7 @@ class TestUserOverride:
 
         p = platform_profiles()["strix-halo"]
         assert p.backend_env.get("EXTRA_VAR") == "yes"
-        # Original env vars still present (deep merge)
-        assert p.backend_env["OLLAMA_VULKAN"] == "1"
+        assert p.backend_env.get("ANOTHER_VAR") == "42"
 
 
 # ---------------------------------------------------------------------------

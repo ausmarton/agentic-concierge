@@ -12,11 +12,9 @@ platform_version: 1
 
 profiles:
   strix-halo:
-    backend_env:
-      OLLAMA_VULKAN: "1"
-      HIP_VISIBLE_DEVICES: "-1"
-    preferred_backends: ["ollama", "llama_cpp"]
-    notes: "AMD Strix Halo APU — ROCm/HIP broken on RDNA 3.5; Vulkan required"
+    backend_env: {}
+    preferred_backends: ["vllm", "ollama", "llama_cpp"]
+    notes: "AMD Strix Halo APU (RDNA 3.5 / gfx1151) — ROCm 7.2+ supported"
 
   apple-silicon:
     backend_env: {}

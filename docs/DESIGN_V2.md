@@ -10,7 +10,7 @@ informed by everything learned building v1 (Phases 1–14 + Specialist Marketpla
 **Target OS (priority order):** Fedora Linux > macOS > Windows
 
 **Status:** IMPLEMENTED — Layer 1 (Model Runtime), Layer 2 (Task Decomposition), Layer 3 (Agent-Model Affinity) all implemented and tested on `main`
-**Last verified:** 2026-03-10 — **1490 Python tests pass**, 27 Rust tests pass
+**Last verified:** 2026-03-11 — **1499 Python tests pass**, 27 Rust tests pass
 
 ---
 
@@ -192,12 +192,7 @@ Carried forward from v1 (VISION.md §2) plus new principles from lessons learned
 - Linux kernel >= 6.18.4 mandatory for Strix Halo KFD driver fixes.
 - GPU hangs under combined AI + video encoding workloads (ROCm #5665).
 
-**Practical recommendation (VERIFIED March 2026):** Use **Vulkan backend** exclusively on Linux:
-```bash
-export OLLAMA_VULKAN=1
-export HIP_VISIBLE_DEVICES=-1  # Disable broken HIP
-```
-This gives full GPU acceleration at ~59 tok/s (7B). Ollama v0.17.7 (latest) supports Vulkan experimentally.
+**Practical recommendation (updated March 2026):** ROCm 7.2+ supports gfx1151 via the `gfx11-generic` ISA target. Both ROCm and Vulkan backends work. ROCm may underutilise unified memory on APUs (allocates VRAM only, not GTT), making Vulkan competitive for prompt processing. Both options are valid; the platform profile no longer forces either.
 
 #### Apple M Series (M1 Pro through M4 Max)
 
@@ -223,9 +218,9 @@ This gives full GPU acceleration at ~59 tok/s (7B). Ollama v0.17.7 (latest) supp
 
 | Backend | Version | GPU Support | Multi-model | Key facts |
 |---------|---------|-------------|-------------|-----------|
-| **Ollama** | **v0.17.7** (Mar 5) | CUDA, Metal, Vulkan (experimental), ROCm (**broken on gfx1151 Linux**) | Up to N concurrent (`OLLAMA_MAX_LOADED_MODELS`) | New engine (v0.17) replaces llama.cpp server mode; 40% faster prompt processing; KV cache 8-bit quant; MLX engine on macOS; `keep_alive` lifecycle control |
-| **llama.cpp** | **b8248** (Mar 9) | CUDA, ROCm/HIP, Vulkan, Metal, SYCL, MUSA, CANN, OpenCL, Hexagon, CPU | One per process | **11 backends**; daily releases; Vulkan best on Strix Halo; `--no-mmap` workaround for >64GB ROCm loading; GPU token sampling (35% faster on NVIDIA) |
-| **vLLM** | **v0.17.0** (Mar 7) | CUDA, ROCm (datacenter MI series only) | One per process | FlashAttention 4; pipeline parallelism; **gfx1151 NOT supported** (issue #22644 closed "not planned"); PyTorch 2.10 |
+| **Ollama** | **v0.17.7** (Mar 5) | CUDA, Metal, Vulkan, ROCm (gfx1151 via gfx11-generic) | Up to N concurrent (`OLLAMA_MAX_LOADED_MODELS`) | New engine (v0.17) replaces llama.cpp server mode; 40% faster prompt processing; KV cache 8-bit quant; MLX engine on macOS; `keep_alive` lifecycle control |
+| **llama.cpp** | **b8248** (Mar 9) | CUDA, ROCm/HIP, Vulkan, Metal, SYCL, MUSA, CANN, OpenCL, Hexagon, CPU | One per process | **11 backends**; daily releases; `--no-mmap` workaround for >64GB ROCm loading; GPU token sampling (35% faster on NVIDIA) |
+| **vLLM** | **v0.17.0** (Mar 7) | CUDA, ROCm (gfx1151 supported via gfx11-generic in ROCm 7.2+) | One per process | FlashAttention 4; pipeline parallelism; first-class ROCm support (93% test pass rate); PyTorch 2.10; pre-built Docker images available |
 | **MLX / vllm-mlx** | MLX **v0.31.0** / vllm-mlx **v0.2.6** | Metal + **CUDA** (new!) | Continuous batching via vllm-mlx | 20–87% faster than llama.cpp on Apple Silicon; now runs on NVIDIA too; MCP tool calling; Anthropic API compat |
 | **SGLang** | **v0.5.9** (Feb 24) | CUDA, ROCm (Instinct only) | One per process | ROCm 7 standardized; no gfx1151; LoRA overlap; Anthropic API compat |
 | **LM Studio** | **v0.4.6** (Feb 27) | CUDA, Metal, Vulkan, ROCm | Multiple via UI | AMD Variable Graphics Memory for 128B on Strix Halo; continuous batching; LM Link remote; Vulkan regressions in v0.4.4+ |
@@ -234,9 +229,9 @@ This gives full GPU acceleration at ~59 tok/s (7B). Ollama v0.17.7 (latest) supp
 ### 4.3 Backend Strategy (revised with March 2026 findings)
 
 **Primary (Fedora Linux / AMD Strix Halo):**
-1. **Ollama v0.17+ with Vulkan** (`OLLAMA_VULKAN=1` + `HIP_VISIBLE_DEVICES=-1`) — Default. HIP/ROCm is broken on gfx1151 Linux (ollama #13589). Vulkan gives full GPU acceleration at ~59 tok/s. Concurrent model support via `OLLAMA_MAX_LOADED_MODELS`.
-2. **llama.cpp server with Vulkan** — Direct control fallback. One process per pinned model. Explicit `--n-gpu-layers`. Use when Ollama's concurrent model management is insufficient.
-3. ~~**vLLM with ROCm**~~ — **REMOVED.** gfx1151 not supported upstream (closed "not planned"). Community workarounds exist but too fragile for production.
+1. **vLLM with ROCm** — Highest throughput for single-model serving. ROCm 7.2+ supports gfx1151 via `gfx11-generic` ISA target. First-class ROCm platform in vLLM (93% CI pass rate as of Jan 2026). Pre-built Docker images available.
+2. **Ollama** — Default multi-model server. Supports ROCm and Vulkan backends. Concurrent model support via `OLLAMA_MAX_LOADED_MODELS`.
+3. **llama.cpp server** — Direct control fallback. One process per pinned model. Explicit `--n-gpu-layers`. Use when Ollama's concurrent model management is insufficient.
 
 **Primary (macOS / Apple Silicon):**
 1. **Ollama** — Same API, Metal backend. Simplest setup. v0.17 includes MLX engine integration.
@@ -544,7 +539,7 @@ class InferenceBackend(Protocol):
    - `list_available()`: `GET /api/tags` (downloaded models)
    - `estimate_memory()`: Parse model metadata from tags/show response
    - Ollama v0.17 manages GPU offloading internally with new engine (not llama.cpp server)
-   - **Strix Halo Linux:** Must set `OLLAMA_VULKAN=1` + `HIP_VISIBLE_DEVICES=-1` (HIP is broken)
+   - **Strix Halo Linux:** ROCm 7.2+ supported via gfx11-generic ISA target; Vulkan also available
    - `keep_alive` accepts: duration strings ("10m"), seconds (3600), -1 (forever), 0 (immediate unload)
 
 2. **LlamaCppBackend** (fallback for explicit GPU control) — Manages llama.cpp b8248+ server processes:
@@ -1090,9 +1085,7 @@ backends:
     urls: ["http://localhost:11434"]
     health_endpoint: "/api/tags"        # GET → 200 means healthy
     priority: 1                         # Lower = preferred
-    env:
-      OLLAMA_VULKAN: "1"               # Applied on Strix Halo Linux
-      HIP_VISIBLE_DEVICES: "-1"
+    env: {}                             # ROCm 7.2+ works natively on gfx1151
 
   llama_cpp:
     # No fixed URL — managed processes get dynamic ports
@@ -1270,8 +1263,8 @@ reloaded on each run).
 
 ### 11.8 Hardware-Adaptive Backend Configuration
 
-**Problem:** Strix Halo needs `OLLAMA_VULKAN=1` and `HIP_VISIBLE_DEVICES=-1`. Apple Silicon
-needs nothing special. Future hardware (e.g., Intel Arc, NVIDIA) needs different settings.
+**Problem:** Different hardware may need different backend configuration. Apple Silicon
+needs nothing special, NVIDIA needs CUDA paths, AMD APUs work with ROCm or Vulkan.
 Currently this is documented but not automated.
 
 **Solution:** Platform detection with automatic environment configuration:
@@ -1284,9 +1277,9 @@ def detect_platform() -> PlatformProfile:
     if gpu.vendor == "AMD" and gpu.arch == "RDNA3.5":
         return PlatformProfile(
             name="strix-halo",
-            backend_env={"OLLAMA_VULKAN": "1", "HIP_VISIBLE_DEVICES": "-1"},
-            preferred_backends=["ollama", "llama_cpp"],
-            notes="ROCm/HIP broken; Vulkan required",
+            backend_env={},
+            preferred_backends=["vllm", "ollama", "llama_cpp"],
+            notes="ROCm 7.2+ supported via gfx11-generic",
         )
     elif gpu.vendor == "Apple":
         return PlatformProfile(
@@ -1525,8 +1518,8 @@ get probed for capabilities.
 | `dynamic_pack.py` `PACK_TEMPLATES` | **Externalized to `templates/*.yaml`** | Loaded from config directory; new specialists = new YAML file |
 | `tool_catalog.py` | Kept; add `think`, `ask_user`, `search_codebase` | Solid foundation |
 | `prompts.py` | Extended with planner/critic prompts | Composable fragment system works |
-| `VLLMChatClient` | **Deprioritised** | gfx1151 not supported; keep for datacenter/NVIDIA but not primary path |
-| Rust launcher | Kept; add `OLLAMA_VULKAN=1` via platform detection | Must ensure Vulkan env vars on Strix Halo |
+| `VLLMChatClient` | Active | ROCm 7.2+ supports gfx1151; first-class vLLM backend on Strix Halo |
+| Rust launcher | Kept; platform detection applies backend env vars | No special env vars needed for Strix Halo (ROCm works natively) |
 | Quality gates 1–4 | Kept | Battle-tested |
 | Runlog + checkpointing | Extended for task graph | Add task_graph events |
 
@@ -1536,9 +1529,9 @@ get probed for capabilities.
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|-----------|--------|------------|
-| **Ollama HIP broken on Strix Halo Linux** | Confirmed | High | Use Vulkan (`OLLAMA_VULKAN=1` + `HIP_VISIBLE_DEVICES=-1`); confirmed working at ~59 tok/s |
-| **vLLM doesn't support gfx1151** | Confirmed | Medium | Removed from backend strategy; Ollama + llama.cpp are sufficient |
-| **Ollama Vulkan is experimental** | High | Medium | Monitor ollama releases; llama.cpp Vulkan as direct fallback; Vulkan proven stable on this hardware |
+| **ROCm APU memory underutilisation** | Known | Medium | ROCm may allocate only VRAM (not GTT) on APUs, ~60% slower than Vulkan for prompt processing; monitor ROCm releases for unified memory fixes |
+| **vLLM ROCm maturity on consumer GPUs** | Medium | Medium | 93% CI pass rate (Jan 2026); pre-built Docker images available; gfx1151 supported via gfx11-generic ISA |
+| **Multiple backend options on Strix Halo** | N/A | Low | All three backends (vLLM, Ollama, llama.cpp) work; platform profile lists all as preferred |
 | Small models can't plan recursively | Low (revised) | High | Qwen3.5-9B has unprecedented reasoning for 9B; adaptive depth; fallback to flat decomposition |
 | Multi-model concurrency causes OOM | Low | High | Resource tracker; Ollama's `OLLAMA_MAX_LOADED_MODELS`; eviction via `keep_alive: 0` |
 | Model swap latency hurts UX | Medium | Medium | Preloading from task graph; `keep_alive: "-1"` for hot models |
