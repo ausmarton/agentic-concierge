@@ -307,6 +307,73 @@ class BackendManager:
 
         return health
 
+    async def ensure_llama_server(
+        self,
+        venv_pip: Optional[str] = None,
+    ) -> BackendHealth:
+        """Ensure llama-server is installed; pip-install if missing.
+
+        If ``llama-server`` is not on PATH, installs ``llama-cpp-python[server]``
+        into the concierge venv.  This provides ``llama-server`` with Vulkan
+        support (the default CMake build), suitable for AMD APUs and other
+        hardware without CUDA.
+
+        Args:
+            venv_pip: Path to the venv's ``pip`` binary.  If ``None``,
+                attempts to discover it from ``platformdirs``.
+        """
+        binary = shutil.which("llama-server")
+        if binary is not None:
+            return self.probe_llama_cpp()
+
+        # Find the venv pip if not provided
+        if venv_pip is None:
+            try:
+                from platformdirs import user_data_path
+                venv_dir = user_data_path("agentic-concierge") / "venv"
+                venv_pip = str(venv_dir / "bin" / "pip")
+                if not shutil.which(venv_pip):
+                    venv_pip = str(venv_dir / "bin" / "python")
+            except Exception:
+                venv_pip = "pip"
+
+        logger.info("llama-server not found; installing llama-cpp-python[server]…")
+        try:
+            # Use pip to install llama-cpp-python with server extras
+            if venv_pip.endswith("python"):
+                cmd = [venv_pip, "-m", "pip", "install", "llama-cpp-python[server]"]
+            else:
+                cmd = [venv_pip, "install", "llama-cpp-python[server]"]
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=600,  # compilation can be slow
+            )
+            if result.returncode == 0:
+                logger.info("llama-cpp-python[server] installed successfully.")
+                return self.probe_llama_cpp()
+            else:
+                logger.warning(
+                    "Failed to install llama-cpp-python[server]: %s",
+                    result.stderr[-500:] if result.stderr else "unknown error",
+                )
+                return BackendHealth(
+                    name="llama_cpp",
+                    status=BackendStatus.NOT_INSTALLED,
+                    error="pip install failed",
+                    hint=f"Manual install: {' '.join(cmd)}",
+                )
+        except Exception as e:
+            logger.warning("Failed to install llama-cpp-python: %s", e)
+            return BackendHealth(
+                name="llama_cpp",
+                status=BackendStatus.NOT_INSTALLED,
+                error=str(e),
+                hint="Install manually: pip install llama-cpp-python[server]",
+            )
+
     def get_healthy_backends(self) -> List[str]:
         """Return names of backends with ``status=HEALTHY`` from the last probe."""
         return [

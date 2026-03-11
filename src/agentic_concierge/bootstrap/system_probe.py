@@ -174,7 +174,112 @@ def _probe_gpus(is_apple: bool, ram_total_mb: int) -> list[GPUDevice]:
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         pass
 
+    if devices:
+        return devices
+
+    # Fallback: AMD APU detection via sysfs + lspci
+    # rocm-smi doesn't work on APUs (e.g. Strix Halo), but the GPU is
+    # detectable via /sys/class/drm and lspci.
+    devices = _probe_amd_sysfs(ram_total_mb)
+
     return devices
+
+
+def _probe_amd_sysfs(ram_total_mb: int) -> list[GPUDevice]:
+    """Detect AMD GPUs via sysfs and lspci when rocm-smi is unavailable.
+
+    This covers AMD APUs (e.g. Strix Halo / Radeon 8060S) where rocm-smi
+    fails but the GPU is visible in /sys/class/drm and lspci.
+    """
+    import re
+
+    devices: list[GPUDevice] = []
+
+    # Check sysfs for AMD GPU (vendor 0x1002)
+    try:
+        from pathlib import Path
+        drm_dir = Path("/sys/class/drm")
+        if not drm_dir.exists():
+            return devices
+
+        seen_devices: set[str] = set()
+        for card_dir in sorted(drm_dir.iterdir()):
+            # Only look at card0, card1, etc. — skip card1-DP-1 etc.
+            if not re.match(r"^card\d+$", card_dir.name):
+                continue
+            vendor_file = card_dir / "device" / "vendor"
+            if not vendor_file.exists():
+                continue
+            vendor = vendor_file.read_text().strip()
+            if vendor != "0x1002":  # AMD
+                continue
+
+            device_path = card_dir / "device" / "device"
+            device_id = device_path.read_text().strip() if device_path.exists() else ""
+
+            # Deduplicate by PCI device path
+            pci_path = str((card_dir / "device").resolve())
+            if pci_path in seen_devices:
+                continue
+            seen_devices.add(pci_path)
+
+            # Read VRAM from sysfs if available
+            vram_file = card_dir / "device" / "mem_info_vram_total"
+            vram_mb = 0
+            if vram_file.exists():
+                try:
+                    vram_bytes = int(vram_file.read_text().strip())
+                    vram_mb = vram_bytes // (1024 * 1024)
+                except (ValueError, OSError):
+                    pass
+
+            # For APUs with unified memory, if VRAM is small (< 4 GB),
+            # the GPU can use system RAM. Report system RAM as usable.
+            if vram_mb < 4096 and ram_total_mb > 0:
+                vram_mb = ram_total_mb
+
+            # Try to get a friendly name via lspci
+            name = _lspci_gpu_name(device_id)
+            if not name:
+                name = f"AMD GPU ({device_id})"
+
+            devices.append(GPUDevice(name=name, vram_mb=vram_mb, vendor="amd"))
+    except Exception:
+        logger.debug("sysfs AMD GPU detection failed", exc_info=True)
+
+    return devices
+
+
+def _lspci_gpu_name(device_id: str) -> str:
+    """Get the friendly GPU name from lspci output matching a device ID."""
+    import re
+    try:
+        result = subprocess.run(
+            ["lspci", "-nn"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return ""
+        for line in result.stdout.splitlines():
+            m = re.match(
+                r"^[0-9a-f:.]+\s+(?:VGA compatible|3D|Display)\s+controller:\s+(.+)",
+                line,
+                re.IGNORECASE,
+            )
+            if not m:
+                continue
+            desc = m.group(1)
+            # Check if this line contains our device ID
+            if device_id.lstrip("0x") in desc.lower():
+                # Clean up the name
+                name = re.sub(r"\s*\[[0-9a-fA-F]{4}:[0-9a-fA-F]{4}\]", "", desc).strip()
+                name = re.sub(r"\s*\(rev\s+[0-9a-fA-F]+\)$", "", name).strip()
+                return name
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+    return ""
 
 
 async def _check_internet() -> bool:

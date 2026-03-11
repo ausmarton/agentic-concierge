@@ -61,6 +61,7 @@ _AMD_ARCH_BY_DEVICE_PREFIX: list[tuple[str, str]] = [
     # RDNA 3.5 (Strix Point / Strix Halo)
     ("150e", "RDNA3.5"),
     ("1502", "RDNA3.5"),
+    ("1586", "RDNA3.5"),
     # RDNA 3 (RX 7000 series)
     ("744c", "RDNA3"),
     ("7480", "RDNA3"),

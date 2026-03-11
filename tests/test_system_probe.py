@@ -10,6 +10,7 @@ import pytest
 from agentic_concierge.bootstrap.system_probe import (
     GPUDevice,
     SystemProbe,
+    _probe_amd_sysfs,
     _probe_gpus,
     probe_system,
 )
@@ -107,7 +108,8 @@ def test_probe_gpus_apple_silicon():
 # ---------------------------------------------------------------------------
 
 def test_probe_gpus_no_gpu():
-    with patch("subprocess.run", side_effect=FileNotFoundError):
+    with patch("subprocess.run", side_effect=FileNotFoundError), \
+         patch("agentic_concierge.bootstrap.system_probe._probe_amd_sysfs", return_value=[]):
         devices = _probe_gpus(is_apple=False, ram_total_mb=16384)
     assert devices == []
 
@@ -181,3 +183,33 @@ async def test_probe_system_vllm_reachable():
     ):
         probe = await probe_system("http://localhost:8000")
     assert probe.vllm_reachable is True
+
+
+# ---------------------------------------------------------------------------
+# _probe_amd_sysfs — AMD APU detection via sysfs
+# ---------------------------------------------------------------------------
+
+
+def test_probe_amd_sysfs_returns_list():
+    """sysfs fallback always returns a list (may be empty on non-AMD machines)."""
+    devices = _probe_amd_sysfs(ram_total_mb=128000)
+    assert isinstance(devices, list)
+    # On a machine with AMD GPU, we should get results
+    # On other machines, returns empty — either way it shouldn't crash
+    for d in devices:
+        assert d.vendor == "amd"
+        assert d.vram_mb > 0
+
+
+def test_probe_gpus_falls_through_to_sysfs():
+    """When nvidia-smi and rocm-smi both fail, _probe_gpus calls _probe_amd_sysfs."""
+    fake_device = GPUDevice(name="AMD APU", vram_mb=128000, vendor="amd")
+    with patch("subprocess.run", side_effect=FileNotFoundError), \
+         patch("agentic_concierge.bootstrap.system_probe._probe_amd_sysfs",
+               return_value=[fake_device]) as mock_sysfs:
+        devices = _probe_gpus(is_apple=False, ram_total_mb=128000)
+
+    mock_sysfs.assert_called_once_with(128000)
+    assert len(devices) == 1
+    assert devices[0].name == "AMD APU"
+    assert devices[0].vram_mb == 128000

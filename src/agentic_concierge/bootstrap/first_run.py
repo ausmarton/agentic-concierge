@@ -102,26 +102,73 @@ async def run(
     if interactive:
         _print_profile_panel(probe, profile)
 
-    # 5. Ensure Ollama if enabled for this profile
-    from agentic_concierge.config.features import PROFILE_FEATURES, Feature
+    # 5. Ensure backends enabled for this profile
+    from agentic_concierge.config.features import PROFILE_FEATURES, Feature, FeatureSet
     profile_features = PROFILE_FEATURES.get(profile.tier, frozenset())
+    feature_set = FeatureSet(profile_features)
+
+    from agentic_concierge.bootstrap.backend_manager import BackendManager, BackendStatus
+    mgr = BackendManager()
+    from agentic_concierge.config import load_config
+    try:
+        cfg = load_config()
+    except Exception:
+        cfg = None
+
+    # 5a. Ensure Ollama
     if Feature.OLLAMA in profile_features and probe.ollama_installed:
         if interactive:
             _print_status("Ensuring Ollama is running…")
-        from agentic_concierge.bootstrap.backend_manager import BackendManager, BackendStatus
-        mgr = BackendManager()
-        from agentic_concierge.config import load_config
-        try:
-            cfg = load_config()
-            health = await mgr.ensure_ollama(cfg)
-            if health.status != BackendStatus.HEALTHY:
-                logger.warning("Ollama not healthy after bootstrap attempt: %s", health.error)
-                if interactive:
-                    _print_status(
-                        f"[yellow]⚠ Ollama not healthy: {health.hint or health.error}[/yellow]"
-                    )
-        except Exception as e:
-            logger.warning("Ollama ensure failed: %s", e)
+        if cfg is not None:
+            try:
+                health = await mgr.ensure_ollama(cfg)
+                if health.status != BackendStatus.HEALTHY:
+                    logger.warning("Ollama not healthy after bootstrap attempt: %s", health.error)
+                    if interactive:
+                        _print_status(
+                            f"[yellow]⚠ Ollama not healthy: {health.hint or health.error}[/yellow]"
+                        )
+            except Exception as e:
+                logger.warning("Ollama ensure failed: %s", e)
+
+    # 5b. Ensure llama-server if llama_cpp is a preferred backend
+    from agentic_concierge.config.platform import detect_platform
+    plat = detect_platform()
+    if Feature.LLAMA_CPP in profile_features and "llama_cpp" in plat.preferred_backends:
+        if not probe.llama_server_installed:
+            if interactive:
+                _print_status("Installing llama-server (llama-cpp-python[server])…")
+            try:
+                health = await mgr.ensure_llama_server()
+                if health.status == BackendStatus.HEALTHY:
+                    if interactive:
+                        _print_status("[green]✓ llama-server installed[/green]")
+                else:
+                    if interactive:
+                        _print_status(
+                            f"[yellow]⚠ llama-server: {health.hint or health.error}[/yellow]"
+                        )
+            except Exception as e:
+                logger.warning("llama-server install failed: %s", e)
+
+    # 5c. Ensure vLLM if enabled and preferred
+    if Feature.VLLM in profile_features and "vllm" in plat.preferred_backends:
+        if interactive:
+            _print_status("Ensuring vLLM is available…")
+        if cfg is not None:
+            try:
+                health = await mgr.ensure_vllm(cfg, feature_set)
+                if health.status == BackendStatus.HEALTHY:
+                    if interactive:
+                        _print_status("[green]✓ vLLM is running[/green]")
+                elif health.status != BackendStatus.DISABLED:
+                    logger.info("vLLM not available: %s", health.hint or health.error)
+                    if interactive:
+                        _print_status(
+                            f"[dim]vLLM: {health.hint or health.error}[/dim]"
+                        )
+            except Exception as e:
+                logger.warning("vLLM ensure failed: %s", e)
 
     # 6. Pull recommended models (non-interactive: skip)
     if interactive and probe.ollama_reachable:

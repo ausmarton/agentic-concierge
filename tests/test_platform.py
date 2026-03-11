@@ -97,6 +97,10 @@ class TestAMDArchLookup:
     def test_rdna35_uppercase(self):
         assert _amd_arch_from_device_id("150E") == "RDNA3.5"
 
+    def test_rdna35_strix_halo_1586(self):
+        """Device ID 1586 is the Radeon 8060S on ZBook Ultra G1a."""
+        assert _amd_arch_from_device_id("1586") == "RDNA3.5"
+
     def test_rdna3_device_id(self):
         assert _amd_arch_from_device_id("744c") == "RDNA3"
 

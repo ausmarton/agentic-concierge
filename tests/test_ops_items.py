@@ -3,6 +3,8 @@
 OPS-1: vLLM auto-start on SERVER/LARGE profiles
 OPS-2: Parallel backend preference for concurrent task graph nodes
 OPS-3: Connection pooling for concurrent requests
+OPS-1b: llama-server auto-install
+OPS-1c: First-run bootstrap wiring
 """
 
 from __future__ import annotations
@@ -596,3 +598,176 @@ class TestAffinityDetectsConcurrency:
 
         await assign_model("coder", runtime, prefer_concurrent=False)
         assert runtime.prefer_concurrent_values == [True, False]
+
+
+# ===========================================================================
+# OPS-1b: ensure_llama_server — auto-install llama-cpp-python[server]
+# ===========================================================================
+
+
+class TestEnsureLlamaServer:
+    """Tests for BackendManager.ensure_llama_server()."""
+
+    @pytest.mark.asyncio
+    async def test_already_installed_probes_health(self):
+        """If llama-server is on PATH, don't install — just probe."""
+        from agentic_concierge.bootstrap.backend_manager import BackendManager, BackendStatus
+
+        with patch("shutil.which", return_value="/usr/bin/llama-server"), \
+             patch("socket.socket"):
+            mgr = BackendManager()
+            health = await mgr.ensure_llama_server()
+        assert health.status == BackendStatus.HEALTHY
+
+    @pytest.mark.asyncio
+    async def test_not_installed_runs_pip(self):
+        """If llama-server missing, runs pip install."""
+        from agentic_concierge.bootstrap.backend_manager import BackendManager, BackendStatus
+        import subprocess
+
+        # First which() call returns None (not installed), second returns the binary (after install)
+        call_count = {"n": 0}
+        def fake_which(name):
+            call_count["n"] += 1
+            if call_count["n"] <= 1:
+                return None
+            return "/venv/bin/llama-server"
+
+        mock_result = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("shutil.which", side_effect=fake_which), \
+             patch("subprocess.run", return_value=mock_result) as mock_run, \
+             patch("socket.socket"):
+            mgr = BackendManager()
+            await mgr.ensure_llama_server(venv_pip="/venv/bin/pip")
+
+        # Verify pip install was called
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        assert "llama-cpp-python[server]" in cmd[-1]
+
+    @pytest.mark.asyncio
+    async def test_pip_failure_returns_not_installed(self):
+        """If pip install fails, return NOT_INSTALLED with hint."""
+        from agentic_concierge.bootstrap.backend_manager import BackendManager, BackendStatus
+
+        mock_result = MagicMock(returncode=1, stdout="", stderr="compilation error")
+        with patch("shutil.which", return_value=None), \
+             patch("subprocess.run", return_value=mock_result):
+            mgr = BackendManager()
+            health = await mgr.ensure_llama_server(venv_pip="/venv/bin/pip")
+
+        assert health.status == BackendStatus.NOT_INSTALLED
+        assert "pip install failed" in (health.error or "")
+
+    @pytest.mark.asyncio
+    async def test_pip_exception_returns_not_installed(self):
+        """If pip subprocess crashes, return NOT_INSTALLED."""
+        from agentic_concierge.bootstrap.backend_manager import BackendManager, BackendStatus
+
+        with patch("shutil.which", return_value=None), \
+             patch("subprocess.run", side_effect=OSError("no such file")):
+            mgr = BackendManager()
+            health = await mgr.ensure_llama_server(venv_pip="/venv/bin/pip")
+
+        assert health.status == BackendStatus.NOT_INSTALLED
+
+
+# ===========================================================================
+# First-run bootstrap wiring — ensure backends are called
+# ===========================================================================
+
+
+class TestFirstRunBackendWiring:
+    """Verify first_run.py calls ensure_vllm and ensure_llama_server."""
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_calls_ensure_llama_server(self):
+        """When llama_cpp is a preferred backend and not installed, ensure_llama_server is called."""
+        from agentic_concierge.bootstrap.backend_manager import BackendHealth, BackendStatus
+
+        mock_probe = MagicMock()
+        mock_probe.cpu_cores = 32
+        mock_probe.cpu_arch = "x86_64"
+        mock_probe.ram_total_mb = 128000
+        mock_probe.ram_available_mb = 100000
+        mock_probe.gpu_devices = []
+        mock_probe.total_vram_mb = 0
+        mock_probe.disk_free_mb = 1000000
+        mock_probe.internet_reachable = True
+        mock_probe.ollama_installed = True
+        mock_probe.ollama_reachable = True
+        mock_probe.vllm_reachable = False
+        mock_probe.llama_server_installed = False
+
+        mock_ensure_llama = AsyncMock(return_value=BackendHealth(
+            name="llama_cpp", status=BackendStatus.HEALTHY,
+        ))
+        mock_ensure_ollama = AsyncMock(return_value=BackendHealth(
+            name="ollama", status=BackendStatus.HEALTHY,
+        ))
+
+        from agentic_concierge.config.platform import PlatformProfile
+
+        with patch("agentic_concierge.bootstrap.first_run.probe_system", return_value=mock_probe), \
+             patch("agentic_concierge.config.platform.detect_platform",
+                   return_value=PlatformProfile(
+                       name="strix-halo",
+                       preferred_backends=["ollama", "llama_cpp"],
+                   )), \
+             patch("agentic_concierge.bootstrap.backend_manager.BackendManager.ensure_llama_server",
+                   mock_ensure_llama), \
+             patch("agentic_concierge.bootstrap.backend_manager.BackendManager.ensure_ollama",
+                   mock_ensure_ollama), \
+             patch("agentic_concierge.bootstrap.first_run._pull_models", new_callable=AsyncMock), \
+             patch("agentic_concierge.bootstrap.detected.is_first_run", return_value=True), \
+             patch("agentic_concierge.bootstrap.detected.save_detected"):
+            from agentic_concierge.bootstrap.first_run import run
+            await run(interactive=False, force_profile="server")
+
+        mock_ensure_llama.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_calls_ensure_vllm_when_preferred(self):
+        """When vllm is a preferred backend, ensure_vllm is called."""
+        from agentic_concierge.bootstrap.backend_manager import BackendHealth, BackendStatus
+
+        mock_probe = MagicMock()
+        mock_probe.cpu_cores = 32
+        mock_probe.cpu_arch = "x86_64"
+        mock_probe.ram_total_mb = 128000
+        mock_probe.ram_available_mb = 100000
+        mock_probe.gpu_devices = []
+        mock_probe.total_vram_mb = 0
+        mock_probe.disk_free_mb = 1000000
+        mock_probe.internet_reachable = True
+        mock_probe.ollama_installed = True
+        mock_probe.ollama_reachable = True
+        mock_probe.vllm_reachable = False
+        mock_probe.llama_server_installed = True
+
+        mock_ensure_vllm = AsyncMock(return_value=BackendHealth(
+            name="vllm", status=BackendStatus.UNREACHABLE,
+        ))
+        mock_ensure_ollama = AsyncMock(return_value=BackendHealth(
+            name="ollama", status=BackendStatus.HEALTHY,
+        ))
+
+        from agentic_concierge.config.platform import PlatformProfile
+
+        with patch("agentic_concierge.bootstrap.first_run.probe_system", return_value=mock_probe), \
+             patch("agentic_concierge.config.platform.detect_platform",
+                   return_value=PlatformProfile(
+                       name="nvidia-cuda",
+                       preferred_backends=["vllm", "ollama"],
+                   )), \
+             patch("agentic_concierge.bootstrap.backend_manager.BackendManager.ensure_vllm",
+                   mock_ensure_vllm), \
+             patch("agentic_concierge.bootstrap.backend_manager.BackendManager.ensure_ollama",
+                   mock_ensure_ollama), \
+             patch("agentic_concierge.bootstrap.first_run._pull_models", new_callable=AsyncMock), \
+             patch("agentic_concierge.bootstrap.detected.is_first_run", return_value=True), \
+             patch("agentic_concierge.bootstrap.detected.save_detected"):
+            from agentic_concierge.bootstrap.first_run import run
+            await run(interactive=False, force_profile="server")
+
+        mock_ensure_vllm.assert_awaited_once()
