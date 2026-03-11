@@ -337,16 +337,16 @@ def match_models(
 # ---------------------------------------------------------------------------
 
 # Tools every specialist gets regardless of capabilities.
-_BASE_TOOLS: List[str] = ["read_file", "list_files"]
+_BASE_TOOLS: List[str] = ["read_file", "write_file", "list_files"]
 
 # Capability → additional tools required to exercise that capability.
 # Model-only capabilities (reasoning, summarisation, instruction_following)
 # map to empty lists — they affect model selection, not tool selection.
 _CAPABILITY_TOOLS: Dict[str, List[str]] = {
     "web_comprehension": ["web_search", "fetch_url"],
-    "code_python": ["shell", "write_file", "run_tests"],
-    "code_rust": ["shell", "write_file", "run_tests"],
-    "code_sql": ["shell", "write_file"],
+    "code_python": ["shell", "run_tests"],
+    "code_rust": ["shell", "run_tests"],
+    "code_sql": ["shell"],
     "reasoning": [],
     "summarisation": [],
     "structured_output": [],  # model capability (JSON schema adherence), not tool

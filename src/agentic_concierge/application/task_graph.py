@@ -57,6 +57,11 @@ class TaskNode:
     # gather new data.
     is_synthesis: bool = False
 
+    # Explicit data dependencies: list of sibling node IDs that must be
+    # "done" before this node can start.  Empty = no dependencies = run
+    # in parallel with other siblings.  Populated from planner output.
+    depends_on: List[str] = field(default_factory=list)
+
     # Results
     result: Optional[Dict[str, Any]] = None
     critique: Optional[str] = None
@@ -103,6 +108,7 @@ class TaskGraph:
         required_tools: Optional[List[str]] = None,
         finish_schema_key: str = "general",
         is_synthesis: bool = False,
+        depends_on: Optional[List[str]] = None,
     ) -> TaskNode:
         """Add a child node under *parent_id*.  Returns the new node."""
         parent = self.nodes.get(parent_id)
@@ -118,6 +124,7 @@ class TaskGraph:
             required_tools=required_tools or [],
             finish_schema_key=finish_schema_key,
             is_synthesis=is_synthesis,
+            depends_on=depends_on or [],
             depth=parent.depth + 1,
         )
         parent.children.append(nid)
@@ -138,38 +145,47 @@ class TaskGraph:
         return [n for n in self.nodes.values() if n.is_leaf and not n.is_terminal]
 
     def ready_nodes(self) -> List[TaskNode]:
-        """Return leaf nodes whose sibling dependencies are satisfied.
+        """Return leaf nodes ready for execution.
 
-        A node is ready when:
-        - It is a leaf (no children)
-        - Its status is ``"pending"``
-        - All sibling nodes that appear *before* it in the parent's children
-          list and are marked sequential (i.e. the default) are ``"done"``
-
-        For the root node (no parent), it is ready if pending and a leaf.
+        Parallel-by-default: siblings run concurrently unless they have
+        explicit ``depends_on`` entries or are marked ``is_synthesis``.
+        Synthesis nodes auto-depend on all preceding non-synthesis siblings.
         """
         ready = []
         for node in self.nodes.values():
             if node.status != "pending" or not node.is_leaf:
                 continue
             if node.parent_id is None:
-                # Root node — always ready if pending + leaf
                 ready.append(node)
                 continue
-            parent = self.nodes[node.parent_id]
-            # Check all siblings that precede this node.
-            # Only "done" unblocks — "failed" blocks subsequent siblings
-            # since they likely depend on the failed sibling's output.
-            preceding_done = True
-            for sib_id in parent.children:
-                if sib_id == node.id:
-                    break
-                sib = self.nodes[sib_id]
-                if sib.status != "done":
-                    preceding_done = False
-                    break
-            if preceding_done:
-                ready.append(node)
+
+            # Check explicit dependencies
+            if node.depends_on:
+                deps_satisfied = all(
+                    self.nodes[dep_id].status == "done"
+                    for dep_id in node.depends_on
+                    if dep_id in self.nodes
+                )
+                if deps_satisfied:
+                    ready.append(node)
+                continue
+
+            # Synthesis nodes auto-depend on all preceding non-synthesis siblings
+            if node.is_synthesis:
+                parent = self.nodes[node.parent_id]
+                all_non_synth_done = all(
+                    self.nodes[sib_id].status == "done"
+                    for sib_id in parent.children
+                    if sib_id != node.id
+                    and sib_id in self.nodes
+                    and not self.nodes[sib_id].is_synthesis
+                )
+                if all_non_synth_done:
+                    ready.append(node)
+                continue
+
+            # No dependencies, not synthesis — immediately ready (parallel)
+            ready.append(node)
         return ready
 
     def children_of(self, node_id: str) -> List[TaskNode]:

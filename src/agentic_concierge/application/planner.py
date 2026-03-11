@@ -85,6 +85,15 @@ _DECOMPOSE_TOOL_DEF: Dict[str, Any] = {
                                     "appear after the data-gathering subtasks they depend on."
                                 ),
                             },
+                            "depends_on": {
+                                "type": "array",
+                                "items": {"type": "integer"},
+                                "description": (
+                                    "Zero-based indices of subtasks this one depends on. "
+                                    "Empty or omitted = runs in parallel with other subtasks. "
+                                    "Only set when this subtask needs output from specific earlier subtasks."
+                                ),
+                            },
                         },
                         "required": ["description", "required_capabilities"],
                     },
@@ -163,7 +172,9 @@ _PLANNER_SYSTEM = (
     "2. COMPLEX TASKS (multi-step engineering, research with multiple sources, "
     "build-and-test workflows) should be decomposed into sequential subtasks.\n"
     "3. Each subtask must specify the capabilities it needs.\n"
-    "4. Subtasks are executed in order — later subtasks can depend on earlier ones.\n"
+    "4. Subtasks run in PARALLEL by default. Use depends_on (list of subtask indices) "
+    "only when a subtask needs output from specific earlier subtasks. Example: if subtask 2 "
+    "needs results from subtask 0, set depends_on=[0] on subtask 2.\n"
     "5. Use finish_schema='quick_answer' for simple factual answers, 'code' for "
     "engineering output, 'research_report' for deep research, 'general' otherwise.\n\n"
     "Call decompose_task with your plan."
@@ -237,9 +248,12 @@ def _parse_decomposition(
 
     graph = TaskGraph.from_root(root_description)
 
+    # First pass: create all child nodes
+    child_ids: List[Optional[str]] = []
     for st in subtasks:
         desc = st.get("description", "")
         if not desc:
+            child_ids.append(None)
             continue
         caps = st.get("required_capabilities", [])
         tools = st.get("required_tools", [])
@@ -247,7 +261,7 @@ def _parse_decomposition(
         if fs not in _KNOWN_FINISH_SCHEMAS:
             fs = "general"
         synthesis = bool(st.get("is_synthesis", False))
-        graph.add_child(
+        child = graph.add_child(
             graph.root_id,
             desc,
             required_capabilities=caps if isinstance(caps, list) else [],
@@ -255,6 +269,20 @@ def _parse_decomposition(
             finish_schema_key=fs,
             is_synthesis=synthesis,
         )
+        child_ids.append(child.id)
+
+    # Second pass: resolve depends_on indices to node IDs
+    for i, st in enumerate(subtasks):
+        if i >= len(child_ids) or child_ids[i] is None:
+            continue
+        raw_deps = st.get("depends_on", [])
+        if isinstance(raw_deps, list):
+            resolved = []
+            for idx in raw_deps:
+                if isinstance(idx, int) and 0 <= idx < len(child_ids) and child_ids[idx] is not None:
+                    resolved.append(child_ids[idx])
+            if resolved:
+                graph.nodes[child_ids[i]].depends_on = resolved
 
     return graph
 

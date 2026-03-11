@@ -115,7 +115,8 @@ _CAP_TO_ROLE: Dict[str, str] = {
     "code_sql": "coder",
     "web_comprehension": "researcher",
     "summarisation": "researcher",
-    "reasoning": "planner",
+    # "reasoning" intentionally omitted — too general; researchers, coders,
+    # and planners all require reasoning.  Falls back to "researcher".
 }
 
 

@@ -8,6 +8,7 @@ template_id: research
 tools:
   - web_search
   - fetch_url
+  - write_file
   - read_file
   - list_files
 

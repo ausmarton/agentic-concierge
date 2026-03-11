@@ -149,8 +149,11 @@ class TestDetermineRole:
         assert determine_role(["web_comprehension"]) == "researcher"
         assert determine_role(["summarisation"]) == "researcher"
 
-    def test_reasoning_maps_to_planner(self):
-        assert determine_role(["reasoning"]) == "planner"
+    def test_reasoning_falls_back_to_researcher(self):
+        # "reasoning" is intentionally not mapped to any specific role
+        # because it's too general — researchers, coders, and planners all
+        # require reasoning.  It falls back to the default "researcher".
+        assert determine_role(["reasoning"]) == "researcher"
 
     def test_mixed_capabilities_majority_wins(self):
         # 2 code caps vs 1 web cap → coder

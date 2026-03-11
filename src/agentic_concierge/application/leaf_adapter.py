@@ -91,14 +91,19 @@ def _build_node_messages(
     - User message with the node description
     - Context from completed preceding siblings (if any)
     """
-    # Gather context from completed preceding siblings
+    # Gather context from dependencies (explicit or all non-self siblings)
     context_parts: List[str] = []
     if node.parent_id is not None:
         parent = graph.nodes.get(node.parent_id)
         if parent is not None:
-            for sib_id in parent.children:
-                if sib_id == node.id:
-                    break
+            if node.depends_on:
+                source_ids = node.depends_on
+            else:
+                source_ids = [
+                    sib_id for sib_id in parent.children
+                    if sib_id != node.id
+                ]
+            for sib_id in source_ids:
                 sib = graph.nodes.get(sib_id)
                 if sib is not None and sib.status == "done" and sib.result:
                     context_block = json.dumps(sib.result, indent=2, ensure_ascii=False)
@@ -254,12 +259,21 @@ def build_leaf_executor(ctx: LeafExecutionContext):
         # completed siblings and only reasoning capabilities.
         _is_synth = getattr(node, "is_synthesis", False)
         if not _is_synth and node.parent_id is not None:
-            _has_done_siblings = any(
+            # Auto-detect synthesis ONLY when ALL non-synthesis siblings
+            # are done — not just any.  This prevents false positives when
+            # siblings run in parallel and one happens to finish first.
+            parent_children = graph.nodes[node.parent_id].children
+            non_synth_siblings = [
+                sib_id for sib_id in parent_children
+                if sib_id != node.id
+                and sib_id in graph.nodes
+                and not getattr(graph.nodes[sib_id], "is_synthesis", False)
+            ]
+            all_non_synth_done = non_synth_siblings and all(
                 graph.nodes[sib_id].status == "done"
-                for sib_id in graph.nodes[node.parent_id].children
-                if sib_id != node.id and sib_id in graph.nodes
+                for sib_id in non_synth_siblings
             )
-            if _has_done_siblings:
+            if all_non_synth_done:
                 _SYNTHESIS_CAPS = {"reasoning", "summarisation", "structured_output",
                                    "instruction_following"}
                 if node.required_capabilities and set(node.required_capabilities).issubset(_SYNTHESIS_CAPS):

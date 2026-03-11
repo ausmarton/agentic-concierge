@@ -106,15 +106,15 @@ class TestSingleLeaf:
 
 
 # ---------------------------------------------------------------------------
-# Sequential execution
+# Parallel-by-default execution
 # ---------------------------------------------------------------------------
 
 
-class TestSequentialExecution:
+class TestParallelByDefaultExecution:
 
     @pytest.mark.asyncio
-    async def test_sequential_order(self):
-        """Siblings execute in order (second waits for first)."""
+    async def test_siblings_execute_in_parallel(self):
+        """Siblings without depends_on all execute (parallel-by-default)."""
         g = TaskGraph.from_root("Root", node_id="r")
         g.add_child("r", "Step 1", node_id="s1")
         g.add_child("r", "Step 2", node_id="s2")
@@ -126,12 +126,28 @@ class TestSequentialExecution:
         result = await execute_graph(g, _counting_executor(order))
 
         assert result.completed is True
-        assert order == ["s1", "s2", "s3"]
+        assert set(order) == {"s1", "s2", "s3"}
         assert result.steps_executed == 3
 
     @pytest.mark.asyncio
-    async def test_failure_blocks_subsequent(self):
-        """When a node fails, subsequent siblings are not executed."""
+    async def test_depends_on_enforces_order(self):
+        """depends_on makes s2 wait for s1."""
+        g = TaskGraph.from_root("Root", node_id="r")
+        g.add_child("r", "Step 1", node_id="s1")
+        g.add_child("r", "Step 2", node_id="s2", depends_on=["s1"])
+        g.transition("r", "decomposing")
+        g.transition("r", "critiqued")
+
+        order: List[str] = []
+        result = await execute_graph(g, _counting_executor(order))
+
+        assert result.completed is True
+        assert order.index("s1") < order.index("s2")
+        assert result.steps_executed == 2
+
+    @pytest.mark.asyncio
+    async def test_failure_does_not_block_independent_siblings(self):
+        """When a node fails, independent siblings still execute."""
         g = TaskGraph.from_root("Root", node_id="r")
         g.add_child("r", "Step 1", node_id="s1")
         g.add_child("r", "Step 2", node_id="s2")
@@ -142,13 +158,30 @@ class TestSequentialExecution:
 
         assert result.completed is False
         assert "s1" in result.failures
+        # s2 executes because it has no depends_on
+        assert "s2" in result.results
+        assert result.steps_executed == 2
+
+    @pytest.mark.asyncio
+    async def test_failure_blocks_dependent_siblings(self):
+        """When a node fails, siblings that depend on it are not executed."""
+        g = TaskGraph.from_root("Root", node_id="r")
+        g.add_child("r", "Step 1", node_id="s1")
+        g.add_child("r", "Step 2", node_id="s2", depends_on=["s1"])
+        g.transition("r", "decomposing")
+        g.transition("r", "critiqued")
+
+        result = await execute_graph(g, _selective_fail_executor({"s1"}))
+
+        assert result.completed is False
+        assert "s1" in result.failures
         assert result.steps_executed == 1
-        # s2 never executed because s1 (preceding sibling) failed
+        # s2 never executed because it depends on s1
         assert "s2" not in result.results
 
     @pytest.mark.asyncio
-    async def test_nested_sequential(self):
-        """Nested structure: root → a → a1, a2 (sequential)."""
+    async def test_nested_parallel_siblings(self):
+        """Nested structure: root → a → a1, a2 (parallel by default)."""
         g = TaskGraph.from_root("Root", node_id="r")
         g.add_child("r", "A", node_id="a")
         g.add_child("a", "A1", node_id="a1")
@@ -160,7 +193,7 @@ class TestSequentialExecution:
         result = await execute_graph(g, _counting_executor(order))
 
         assert result.completed is True
-        assert order == ["a1", "a2"]
+        assert set(order) == {"a1", "a2"}
         # Parent 'a' should be auto-completed
         assert g.nodes["a"].status == "done"
 
@@ -174,7 +207,7 @@ class TestParallelExecution:
 
     @pytest.mark.asyncio
     async def test_independent_subtrees_parallel(self):
-        """Independent subtrees under different parents can run in parallel.
+        """Independent subtrees under different parents run in parallel.
 
         root
         ├── a (parent)
@@ -182,8 +215,8 @@ class TestParallelExecution:
         └── b (parent)
             └── b1 (leaf)
 
-        But a and b are siblings under root, so they're sequential.
-        However, a1 is ready first, and after a completes, b1 becomes ready.
+        a and b are siblings under root with no depends_on, so a1 and b1
+        are both ready in the first round (parallel-by-default).
         """
         g = TaskGraph.from_root("Root", node_id="r")
         g.add_child("r", "A", node_id="a")
@@ -198,33 +231,26 @@ class TestParallelExecution:
 
         assert result.completed is True
         assert result.steps_executed == 2
-        # a1 must come before b1 (a blocks b at the root level)
-        assert order.index("a1") < order.index("b1")
+        assert set(order) == {"a1", "b1"}
 
     @pytest.mark.asyncio
     async def test_true_parallel_leaves(self):
-        """Leaves under different subtrees that are simultaneously ready
-        should execute in the same round.
+        """Siblings under the same parent run in parallel by default.
 
-        We achieve true parallelism by having leaves at depth 2 under
-        a single parent that's the only child of root.
-        root → parent → [leaf1, leaf2] (sequential siblings)
-        Actually these are sequential. Let's test a different structure.
-
-        For truly parallel execution, we need leaves that are both ready
-        at the same time. Since siblings are sequential, we can test
-        by having a single child at root level.
+        root → parent → [leaf1, leaf2] both ready simultaneously.
         """
-        # Single path: root → only-child → leaf
-        # This is sequential. True parallel would need architecture changes.
-        # For now, verify the executor handles the gather correctly.
         g = TaskGraph.from_root("Root", node_id="r")
-        g.add_child("r", "Only task", node_id="t1")
+        g.add_child("r", "Parent", node_id="p")
+        g.add_child("p", "Leaf 1", node_id="l1")
+        g.add_child("p", "Leaf 2", node_id="l2")
         g.transition("r", "decomposing")
         g.transition("r", "critiqued")
 
-        result = await execute_graph(g, _ok_executor)
+        order: List[str] = []
+        result = await execute_graph(g, _counting_executor(order))
+
         assert result.completed is True
+        assert set(order) == {"l1", "l2"}
 
 
 # ---------------------------------------------------------------------------
@@ -254,13 +280,13 @@ class TestCompletionPropagation:
         g = TaskGraph.from_root("Root", node_id="r")
         g.add_child("r", "A", node_id="a")
         g.add_child("a", "A1", node_id="a1")
-        g.add_child("a", "A2", node_id="a2")
+        g.add_child("a", "A2", node_id="a2", depends_on=["a1"])
         g.transition("r", "decomposing")
         g.transition("r", "critiqued")
 
         result = await execute_graph(g, _selective_fail_executor({"a1"}))
 
-        # a1 failed → a2 never runs → a not done → root not done
+        # a1 failed → a2 depends on a1, never runs → a not done → root not done
         assert g.nodes["a"].status != "done"
         assert result.completed is False
 
@@ -341,10 +367,17 @@ class TestSafetyLimits:
 
     @pytest.mark.asyncio
     async def test_max_steps_limit(self):
-        """Execution stops at max_steps even if not complete."""
+        """Execution stops at max_steps even if not complete.
+
+        With parallel-by-default, we use depends_on to create sequential
+        rounds so max_steps triggers between rounds.
+        """
         g = TaskGraph.from_root("Root", node_id="r")
+        prev_id = None
         for i in range(10):
-            g.add_child("r", f"Task {i}", node_id=f"t{i}")
+            deps = [prev_id] if prev_id else None
+            g.add_child("r", f"Task {i}", node_id=f"t{i}", depends_on=deps or [])
+            prev_id = f"t{i}"
         g.transition("r", "decomposing")
         g.transition("r", "critiqued")
 
@@ -358,11 +391,11 @@ class TestSafetyLimits:
         """Graph with no ready nodes but not done emits stall event."""
         g = TaskGraph.from_root("Root", node_id="r")
         g.add_child("r", "A", node_id="a")
-        g.add_child("r", "B", node_id="b")
+        g.add_child("r", "B", node_id="b", depends_on=["a"])
         g.transition("r", "decomposing")
         g.transition("r", "critiqued")
 
-        # Fail 'a' — then 'b' can't become ready (preceding sibling failed)
+        # Fail 'a' — then 'b' can't become ready (depends on 'a')
         events = EventCollector()
         result = await execute_graph(
             g, _selective_fail_executor({"a"}), on_event=events,

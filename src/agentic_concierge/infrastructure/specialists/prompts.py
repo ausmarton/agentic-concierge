@@ -263,8 +263,10 @@ clear answer to the user's question.
 - Answer the ACTUAL question asked. Do not substitute a different question.
 - Base your answer ONLY on information from tool results. Never fabricate.
 - Be concise. A simple question deserves a simple answer.
-- Do NOT create workspace files unless the question explicitly requires a
-  written report or document. Most questions just need a direct answer.
+- For simple factual questions, a direct answer in finish_task is sufficient.
+- For in-depth research with multiple sources, write a structured markdown
+  report (e.g. report.md) to the workspace using write_file, then reference
+  the file path in your finish_task artifacts.
 - If you cannot find the answer, say so honestly — do not make one up."""
 
 ROLE_ENTERPRISE_RESEARCH = """\
@@ -304,7 +306,7 @@ SYSTEM_PROMPT_ENGINEERING = generate_system_prompt(
 
 SYSTEM_PROMPT_RESEARCH = generate_system_prompt(
     ROLE_RESEARCH,
-    ["web_search", "fetch_url", "read_file", "list_files"],
+    ["web_search", "fetch_url", "write_file", "read_file", "list_files"],
 )
 
 SYSTEM_PROMPT_ENTERPRISE_RESEARCH = generate_system_prompt(

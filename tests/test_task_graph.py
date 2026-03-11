@@ -119,23 +119,23 @@ class TestTraversal:
         g = TaskGraph.from_root("Solo", node_id="r")
         assert g.leaves() == [g.root]
 
-    def test_ready_nodes_sequential_siblings(self):
-        """Only the first pending sibling at each level is ready."""
+    def test_ready_nodes_parallel_siblings(self):
+        """Siblings without depends_on are all ready in parallel."""
         g = self._sample_graph()
         ready_ids = {n.id for n in g.ready_nodes()}
-        # a1 is ready (first child of a, which is first child of root)
+        # All leaf siblings are ready in parallel (no depends_on)
         assert "a1" in ready_ids
-        # a2 is NOT ready because a1 (preceding sibling) is not done
-        assert "a2" not in ready_ids
-        # b is NOT ready because a (preceding sibling of b) is not done
-        assert "b" not in ready_ids
+        assert "a2" in ready_ids
+        assert "b" in ready_ids
 
     def test_ready_nodes_after_sibling_done(self):
         g = self._sample_graph()
         g.transition("a1", "executing")
         g.mark_done("a1", {"answer": "ok"})
         ready_ids = {n.id for n in g.ready_nodes()}
+        # a2 still ready (parallel by default), a1 is done so not in ready
         assert "a2" in ready_ids
+        assert "a1" not in ready_ids
 
     def test_ready_nodes_root_pending_leaf(self):
         g = TaskGraph.from_root("Solo", node_id="r")
@@ -170,6 +170,91 @@ class TestTraversal:
         g = self._sample_graph()
         with pytest.raises(KeyError):
             g.ancestors("nope")
+
+    def test_ready_nodes_parallel_by_default(self):
+        """Three siblings with no depends_on should all be ready immediately."""
+        g = TaskGraph.from_root("Root", node_id="r")
+        g.add_child("r", "A", node_id="a")
+        g.add_child("r", "B", node_id="b")
+        g.add_child("r", "C", node_id="c")
+        ready_ids = {n.id for n in g.ready_nodes()}
+        assert ready_ids == {"a", "b", "c"}
+
+    def test_ready_nodes_with_depends_on(self):
+        """Subtask with depends_on waits for specified dependencies."""
+        g = TaskGraph.from_root("Root", node_id="r")
+        g.add_child("r", "A", node_id="a")
+        g.add_child("r", "B", node_id="b", depends_on=["a"])
+        g.add_child("r", "C", node_id="c")
+
+        ready_ids = {n.id for n in g.ready_nodes()}
+        # a and c are ready (no deps), b waits for a
+        assert "a" in ready_ids
+        assert "c" in ready_ids
+        assert "b" not in ready_ids
+
+        # Complete a → b should now be ready
+        g.transition("a", "executing")
+        g.mark_done("a", {"result": "ok"})
+        ready_ids = {n.id for n in g.ready_nodes()}
+        assert "b" in ready_ids
+
+    def test_ready_nodes_synthesis_auto_depends(self):
+        """Synthesis node waits for all non-synthesis siblings."""
+        g = TaskGraph.from_root("Root", node_id="r")
+        g.add_child("r", "Research A", node_id="a")
+        g.add_child("r", "Research B", node_id="b")
+        g.add_child("r", "Combine results", node_id="s", is_synthesis=True)
+
+        ready_ids = {n.id for n in g.ready_nodes()}
+        # a and b are ready, synthesis node s is not
+        assert "a" in ready_ids
+        assert "b" in ready_ids
+        assert "s" not in ready_ids
+
+        # Complete a only → s still not ready (b is not done)
+        g.transition("a", "executing")
+        g.mark_done("a", {"result": "A done"})
+        ready_ids = {n.id for n in g.ready_nodes()}
+        assert "s" not in ready_ids
+
+        # Complete b → s should now be ready
+        g.transition("b", "executing")
+        g.mark_done("b", {"result": "B done"})
+        ready_ids = {n.id for n in g.ready_nodes()}
+        assert "s" in ready_ids
+
+    def test_ready_nodes_depends_on_multiple(self):
+        """Subtask depending on multiple predecessors waits for all."""
+        g = TaskGraph.from_root("Root", node_id="r")
+        g.add_child("r", "A", node_id="a")
+        g.add_child("r", "B", node_id="b")
+        g.add_child("r", "C", node_id="c", depends_on=["a", "b"])
+
+        ready_ids = {n.id for n in g.ready_nodes()}
+        assert "a" in ready_ids
+        assert "b" in ready_ids
+        assert "c" not in ready_ids
+
+        # Complete a only → c still not ready
+        g.transition("a", "executing")
+        g.mark_done("a", {"r": 1})
+        ready_ids = {n.id for n in g.ready_nodes()}
+        assert "c" not in ready_ids
+
+        # Complete b → c is ready
+        g.transition("b", "executing")
+        g.mark_done("b", {"r": 2})
+        ready_ids = {n.id for n in g.ready_nodes()}
+        assert "c" in ready_ids
+
+    def test_add_child_with_depends_on(self):
+        """add_child wires depends_on correctly."""
+        g = TaskGraph.from_root("Root", node_id="r")
+        a = g.add_child("r", "A", node_id="a")
+        b = g.add_child("r", "B", node_id="b", depends_on=["a"])
+        assert a.depends_on == []
+        assert b.depends_on == ["a"]
 
 
 # ---------------------------------------------------------------------------
@@ -423,6 +508,10 @@ class TestSynthesisFlag:
     def test_default_is_false(self):
         node = TaskNode(id="n", description="test")
         assert node.is_synthesis is False
+
+    def test_depends_on_default_is_empty(self):
+        node = TaskNode(id="n", description="test")
+        assert node.depends_on == []
 
     def test_add_child_with_synthesis(self):
         g = TaskGraph.from_root("Task", node_id="r")

@@ -36,6 +36,7 @@ def test_research_template_has_correct_tools():
     tpl = pack_templates()["research"]
     assert "web_search" in tpl.tool_names
     assert "fetch_url" in tpl.tool_names
+    assert "write_file" in tpl.tool_names
     assert "read_file" in tpl.tool_names
     assert "list_files" in tpl.tool_names
 

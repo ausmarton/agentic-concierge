@@ -73,6 +73,7 @@ class TestNodeSerialization:
         assert restored.required_tools == []
         assert restored.finish_schema_key == "general"
         assert restored.is_synthesis is False
+        assert restored.depends_on == []
         assert restored.result is None
         assert restored.critique is None
         assert restored.depth == 0
@@ -88,6 +89,7 @@ class TestNodeSerialization:
             required_tools=["shell", "run_tests"],
             finish_schema_key="code",
             is_synthesis=True,
+            depends_on=["dep1", "dep2"],
             result={"summary": "done", "files_modified": ["a.py"]},
             critique="Looks good",
             depth=3,
@@ -103,6 +105,7 @@ class TestNodeSerialization:
         assert restored.required_tools == ["shell", "run_tests"]
         assert restored.finish_schema_key == "code"
         assert restored.is_synthesis is True
+        assert restored.depends_on == ["dep1", "dep2"]
         assert restored.result == {"summary": "done", "files_modified": ["a.py"]}
         assert restored.critique == "Looks good"
         assert restored.depth == 3
@@ -128,6 +131,20 @@ class TestNodeSerialization:
         data = {"id": "n", "description": "old node", "status": "pending"}
         node = deserialize_node(data)
         assert node.is_synthesis is False
+
+    def test_deserialize_missing_depends_on_defaults_empty(self):
+        """Legacy data without depends_on field defaults to empty list."""
+        data = {"id": "n", "description": "old node", "status": "pending"}
+        node = deserialize_node(data)
+        assert node.depends_on == []
+
+    def test_round_trip_depends_on(self):
+        """depends_on list is preserved through serialization."""
+        node = TaskNode(id="n", description="task", depends_on=["a", "b"])
+        data = serialize_node(node)
+        assert data["depends_on"] == ["a", "b"]
+        restored = deserialize_node(data)
+        assert restored.depends_on == ["a", "b"]
 
     def test_serialized_is_json_compatible(self):
         node = TaskNode(id="n1", description="task", result={"key": [1, 2, 3]})
@@ -239,12 +256,10 @@ class TestGraphSerialization:
         g = _simple_graph()
         data = serialize_graph(g)
         restored = deserialize_graph(data)
-        # ready_nodes should return both children (preceding sibling for 'b' is 'a' which is pending)
-        # Actually, ready_nodes returns pending leaves whose preceding siblings are done.
-        # 'a' has no preceding siblings → ready.  'b' has preceding 'a' which is pending → NOT ready.
+        # Parallel-by-default: both children are ready (no depends_on).
         ready = restored.ready_nodes()
-        assert len(ready) == 1
-        assert ready[0].id == "a"
+        ready_ids = {n.id for n in ready}
+        assert ready_ids == {"a", "b"}
 
     def test_leaves_work_after_deserialize(self):
         g = _simple_graph()

@@ -195,11 +195,13 @@ class TestAffinityPreload:
 
     @pytest.mark.asyncio
     async def test_preload_issued_for_next_sibling(self):
+        """When s2 depends on s1, a preload hint for s2 is issued while s1 runs."""
         g = TaskGraph.from_root("Root", node_id="r")
         g.add_child("r", "Step 1", node_id="s1",
                      required_capabilities=["code_python"])
         g.add_child("r", "Step 2", node_id="s2",
-                     required_capabilities=["web_comprehension"])
+                     required_capabilities=["web_comprehension"],
+                     depends_on=["s1"])
         g.transition("r", "decomposing")
         g.transition("r", "critiqued")
 
@@ -230,7 +232,8 @@ class TestAffinityPreload:
         g.add_child("r", "S1", node_id="s1",
                      required_capabilities=["code_python"])
         g.add_child("r", "S2", node_id="s2",
-                     required_capabilities=["web_comprehension"])
+                     required_capabilities=["web_comprehension"],
+                     depends_on=["s1"])
         g.transition("r", "decomposing")
         g.transition("r", "critiqued")
 

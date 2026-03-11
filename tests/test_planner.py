@@ -157,6 +157,54 @@ class TestParseDecomposition:
         graph = _parse_decomposition(args, "Root")
         assert graph.node_count() == 2  # root + 1 valid child
 
+    def test_depends_on_indices_resolved_to_node_ids(self):
+        """depends_on indices are resolved to actual node IDs."""
+        args = {"subtasks": [
+            _simple_subtask("Step 0"),
+            _simple_subtask("Step 1"),
+            {**_simple_subtask("Step 2"), "depends_on": [0, 1]},
+        ]}
+        graph = _parse_decomposition(args, "Task with deps")
+        children = graph.children_of(graph.root_id)
+        assert len(children) == 3
+        # First two have no dependencies
+        assert children[0].depends_on == []
+        assert children[1].depends_on == []
+        # Third depends on the first two
+        assert children[2].depends_on == [children[0].id, children[1].id]
+
+    def test_depends_on_ignores_invalid_indices(self):
+        """Out-of-range or non-integer indices in depends_on are silently ignored."""
+        args = {"subtasks": [
+            _simple_subtask("Step 0"),
+            {**_simple_subtask("Step 1"), "depends_on": [99, -1, "bad"]},
+        ]}
+        graph = _parse_decomposition(args, "Task with bad deps")
+        children = graph.children_of(graph.root_id)
+        assert children[1].depends_on == []
+
+    def test_depends_on_skips_empty_description_slots(self):
+        """depends_on index pointing to a skipped (empty-description) subtask is ignored."""
+        args = {"subtasks": [
+            {"description": "", "required_capabilities": ["reasoning"]},
+            {**_simple_subtask("Step 1"), "depends_on": [0]},
+        ]}
+        graph = _parse_decomposition(args, "Task")
+        children = graph.children_of(graph.root_id)
+        assert len(children) == 1
+        # Index 0 had empty desc → child_ids[0] is None → dep ignored
+        assert children[0].depends_on == []
+
+    def test_depends_on_not_a_list_ignored(self):
+        """Non-list depends_on value is ignored."""
+        args = {"subtasks": [
+            _simple_subtask("Step 0"),
+            {**_simple_subtask("Step 1"), "depends_on": "invalid"},
+        ]}
+        graph = _parse_decomposition(args, "Task")
+        children = graph.children_of(graph.root_id)
+        assert children[1].depends_on == []
+
 
 # ---------------------------------------------------------------------------
 # _call_planner
