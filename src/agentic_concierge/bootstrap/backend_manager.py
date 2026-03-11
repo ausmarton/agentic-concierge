@@ -524,7 +524,7 @@ class BackendManager:
         from agentic_concierge.config.platform import detect_gpu
 
         gpu = detect_gpu()
-        image = "rocm/vllm:latest" if gpu.vendor == "amd" else "vllm/vllm-openai:latest"
+        image = "docker.io/rocm/vllm:latest" if gpu.vendor == "amd" else "docker.io/vllm/vllm-openai:latest"
         logger.info("Pulling vLLM container image %s via %s…", image, container_cmd)
 
         try:
@@ -559,7 +559,7 @@ class BackendManager:
         from agentic_concierge.config.platform import detect_gpu
 
         gpu = detect_gpu()
-        image = "rocm/vllm:latest" if gpu.vendor == "amd" else "vllm/vllm-openai:latest"
+        image = "docker.io/rocm/vllm:latest" if gpu.vendor == "amd" else "docker.io/vllm/vllm-openai:latest"
 
         # GPU device flags
         if gpu.vendor == "amd":
