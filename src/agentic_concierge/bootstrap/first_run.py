@@ -173,6 +173,29 @@ async def run(
             except Exception as e:
                 logger.warning("vLLM ensure failed: %s", e)
 
+    # 5d. Provision models on all healthy backends
+    await mgr.probe_all(feature_set)
+    healthy = mgr.get_healthy_backends()
+    if healthy:
+        models_to_provision = [profile.routing_model, profile.fast_model]
+        if profile.fast_model != profile.quality_model:
+            models_to_provision.append(profile.quality_model)
+
+        if interactive:
+            _print_status("Provisioning models on healthy backends...")
+
+        try:
+            provisioned = await mgr.ensure_backend_models(
+                models_to_provision, healthy, interactive=interactive,
+            )
+            for backend, models in provisioned.items():
+                if models and interactive:
+                    _print_status(
+                        f"[green]{backend}: {len(models)} model(s) ready[/green]"
+                    )
+        except Exception as e:
+            logger.warning("Backend model provisioning failed: %s", e)
+
     # 6. Pull recommended models (non-interactive: skip)
     if interactive and probe.ollama_reachable:
         models_to_pull = [profile.routing_model, profile.fast_model]

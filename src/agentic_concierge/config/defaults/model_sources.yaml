@@ -1,0 +1,54 @@
+catalog_version: 1
+
+# Maps Ollama-style model names to external source information
+# for non-Ollama backends (llama_cpp GGUF downloads, vLLM HF model IDs).
+#
+# Override by placing model_sources.yaml in ~/.config/concierge/
+# or by setting CONCIERGE_MODEL_SOURCES_PATH.
+
+models:
+  "qwen2.5:0.5b":
+    gguf_repo: "Qwen/Qwen2.5-0.5B-Instruct-GGUF"
+    gguf_file: "qwen2.5-0.5b-instruct-q8_0.gguf"
+    hf_model_id: "Qwen/Qwen2.5-0.5B-Instruct"
+    size_mb: 531
+
+  "qwen2.5:3b":
+    gguf_repo: "Qwen/Qwen2.5-3B-Instruct-GGUF"
+    gguf_file: "qwen2.5-3b-instruct-q4_k_m.gguf"
+    hf_model_id: "Qwen/Qwen2.5-3B-Instruct"
+    size_mb: 2020
+
+  "qwen2.5:7b":
+    gguf_repo: "Qwen/Qwen2.5-7B-Instruct-GGUF"
+    gguf_file: "qwen2.5-7b-instruct-q4_k_m.gguf"
+    hf_model_id: "Qwen/Qwen2.5-7B-Instruct"
+    size_mb: 4680
+
+  "qwen2.5:14b":
+    gguf_repo: "Qwen/Qwen2.5-14B-Instruct-GGUF"
+    gguf_file: "qwen2.5-14b-instruct-q4_k_m.gguf"
+    hf_model_id: "Qwen/Qwen2.5-14B-Instruct"
+    size_mb: 8990
+
+  "qwen2.5:32b":
+    gguf_repo: "Qwen/Qwen2.5-32B-Instruct-GGUF"
+    gguf_file: "qwen2.5-32b-instruct-q4_k_m.gguf"
+    hf_model_id: "Qwen/Qwen2.5-32B-Instruct"
+    size_mb: 19850
+
+  "qwen2.5:72b":
+    gguf_repo: "Qwen/Qwen2.5-72B-Instruct-GGUF"
+    gguf_file: "qwen2.5-72b-instruct-q4_k_m.gguf"
+    hf_model_id: "Qwen/Qwen2.5-72B-Instruct"
+    size_mb: 43170
+
+  "phi3:mini":
+    gguf_repo: "microsoft/Phi-3-mini-4k-instruct-gguf"
+    gguf_file: "Phi-3-mini-4k-instruct-q4.gguf"
+    hf_model_id: "microsoft/Phi-3-mini-4k-instruct"
+    size_mb: 2390
+
+# HuggingFace GGUF download URL template.
+# {repo} and {file} are substituted at download time.
+gguf_url_template: "https://huggingface.co/{repo}/resolve/main/{file}"

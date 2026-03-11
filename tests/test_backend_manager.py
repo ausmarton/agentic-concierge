@@ -238,3 +238,110 @@ async def test_probe_all_all_disabled():
 def test_get_healthy_backends_empty_before_probe():
     mgr = BackendManager()
     assert mgr.get_healthy_backends() == []
+
+
+# ---------------------------------------------------------------------------
+# ensure_backend_models
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_ensure_backend_models_skips_ollama():
+    """Ollama is skipped — it has its own pull mechanism."""
+    mgr = BackendManager()
+    result = await mgr.ensure_backend_models(
+        ["qwen2.5:7b"], ["ollama"], interactive=False,
+    )
+    assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_ensure_backend_models_provisions_llama_cpp():
+    """llama_cpp backend triggers GGUF download."""
+    mgr = BackendManager()
+
+    with patch(
+        "agentic_concierge.bootstrap.backend_manager.BackendManager._provision_llama_cpp_models",
+        new_callable=AsyncMock,
+        return_value=["qwen2.5:7b"],
+    ):
+        result = await mgr.ensure_backend_models(
+            ["qwen2.5:7b"], ["llama_cpp"], interactive=False,
+        )
+
+    assert result == {"llama_cpp": ["qwen2.5:7b"]}
+
+
+@pytest.mark.asyncio
+async def test_ensure_backend_models_provisions_vllm():
+    """vLLM backend creates HF cache dir and logs mapping."""
+    mgr = BackendManager()
+
+    with patch(
+        "agentic_concierge.bootstrap.backend_manager.BackendManager._provision_vllm_models",
+        return_value=["qwen2.5:7b"],
+    ):
+        result = await mgr.ensure_backend_models(
+            ["qwen2.5:7b"], ["vllm"], interactive=False,
+        )
+
+    assert result == {"vllm": ["qwen2.5:7b"]}
+
+
+@pytest.mark.asyncio
+async def test_provision_llama_cpp_models_downloads(tmp_path):
+    """_provision_llama_cpp_models calls download_gguf for each known model."""
+    mgr = BackendManager()
+
+    with (
+        patch(
+            "agentic_concierge.infrastructure.backends.model_downloader.default_model_dir",
+            return_value=str(tmp_path),
+        ),
+        patch(
+            "agentic_concierge.infrastructure.backends.model_downloader.get_model_source",
+            return_value={"size_mb": 100},
+        ),
+        patch(
+            "agentic_concierge.infrastructure.backends.model_downloader.download_gguf",
+            new_callable=AsyncMock,
+            return_value="qwen2.5-7b-instruct-q4_k_m.gguf",
+        ),
+    ):
+        result = await mgr._provision_llama_cpp_models(["qwen2.5:7b"], interactive=False)
+
+    assert result == ["qwen2.5:7b"]
+
+
+@pytest.mark.asyncio
+async def test_provision_llama_cpp_models_skips_unknown():
+    """Models without GGUF source info are skipped."""
+    mgr = BackendManager()
+
+    with (
+        patch(
+            "agentic_concierge.infrastructure.backends.model_downloader.default_model_dir",
+            return_value="/tmp/test-models",
+        ),
+        patch(
+            "agentic_concierge.infrastructure.backends.model_downloader.get_model_source",
+            return_value=None,
+        ),
+    ):
+        result = await mgr._provision_llama_cpp_models(
+            ["unknown:model"], interactive=False,
+        )
+
+    assert result == []
+
+
+def test_provision_vllm_models_maps_hf_ids():
+    """_provision_vllm_models returns models with known HF mappings."""
+    mgr = BackendManager()
+
+    with patch(
+        "agentic_concierge.infrastructure.backends.model_downloader.get_hf_model_id",
+        side_effect=lambda n: "Qwen/Qwen2.5-7B-Instruct" if n == "qwen2.5:7b" else None,
+    ):
+        result = mgr._provision_vllm_models(["qwen2.5:7b", "unknown:model"])
+
+    assert result == ["qwen2.5:7b"]

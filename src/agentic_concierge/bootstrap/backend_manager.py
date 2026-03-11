@@ -382,8 +382,15 @@ class BackendManager:
         if container_only:
             return await self._start_vllm_container_server(config, model)
 
+        # Map Ollama-style model name to HF model ID for native vLLM
+        from agentic_concierge.infrastructure.backends.model_downloader import (
+            get_hf_model_id,
+        )
+        hf_id = get_hf_model_id(model)
+        vllm_model = hf_id if hf_id else model
+
         cmd = list(config.vllm_start_cmd) + [
-            "--model", model,
+            "--model", vllm_model,
             "--gpu-memory-utilization", str(config.vllm_gpu_memory_utilization),
             "--host", "0.0.0.0",
             "--port", str(self.vllm_base_url.split(":")[-1].rstrip("/")),
@@ -611,14 +618,26 @@ class BackendManager:
         else:
             gpu_flags = []
 
+        # Map Ollama-style model name to HF model ID for vLLM
+        from agentic_concierge.infrastructure.backends.model_downloader import (
+            get_hf_model_id,
+        )
+        hf_id = get_hf_model_id(model)
+        vllm_model = hf_id if hf_id else model
+
+        # Volume mount for HF model cache persistence
+        hf_cache = os.path.expanduser("~/.cache/huggingface")
+        os.makedirs(hf_cache, exist_ok=True)
+
         port = self.vllm_base_url.split(":")[-1].rstrip("/")
         cmd = [
             container_cmd, "run", "-d", "--rm",
             "--name", "concierge-vllm",
             *gpu_flags,
+            "-v", f"{hf_cache}:/root/.cache/huggingface",
             "-p", f"{port}:8000",
             image,
-            "--model", model,
+            "--model", vllm_model,
             "--gpu-memory-utilization", str(config.vllm_gpu_memory_utilization),
         ]
 
@@ -651,3 +670,130 @@ class BackendManager:
             name for name, h in self._health.items()
             if h.status == BackendStatus.HEALTHY
         ]
+
+    # -------------------------------------------------------------------
+    # Backend model provisioning
+    # -------------------------------------------------------------------
+
+    async def ensure_backend_models(
+        self,
+        model_names: List[str],
+        healthy_backends: List[str],
+        interactive: bool = True,
+    ) -> Dict[str, List[str]]:
+        """Ensure profile models are available on all healthy backends.
+
+        For each healthy non-Ollama backend, downloads/provisions the
+        required models.  Ollama is skipped because first_run.py handles
+        its model pulling separately via the /api/pull API.
+
+        Args:
+            model_names: Ollama-style model names to provision.
+            healthy_backends: Names of backends that are healthy.
+            interactive: Show progress when True.
+
+        Returns:
+            Dict mapping backend name -> list of models provisioned.
+        """
+        provisioned: Dict[str, List[str]] = {}
+
+        for backend_name in healthy_backends:
+            if backend_name == "ollama":
+                continue  # Ollama has its own pull mechanism
+
+            if backend_name == "llama_cpp":
+                provisioned["llama_cpp"] = await self._provision_llama_cpp_models(
+                    model_names, interactive,
+                )
+            elif backend_name == "vllm":
+                # vLLM auto-downloads HF models on server startup;
+                # we just need to ensure the name mapping is available
+                # and the HF cache dir exists for container mode.
+                provisioned["vllm"] = self._provision_vllm_models(model_names)
+
+        return provisioned
+
+    async def _provision_llama_cpp_models(
+        self,
+        model_names: List[str],
+        interactive: bool,
+    ) -> List[str]:
+        """Download GGUF files for llama_cpp backend."""
+        from agentic_concierge.infrastructure.backends.model_downloader import (
+            default_model_dir,
+            download_gguf,
+            get_model_source,
+        )
+
+        model_dir = default_model_dir()
+        os.makedirs(model_dir, exist_ok=True)
+
+        provisioned = []
+        for name in model_names:
+            source = get_model_source(name)
+            if source is None:
+                logger.info(
+                    "No GGUF source for %s; skipping llama_cpp provision", name,
+                )
+                continue
+
+            if interactive:
+                size_mb = source.get("size_mb", 0)
+                _print_status(f"[dim]Downloading {name} GGUF ({size_mb} MB)...[/dim]")
+
+            def _progress(downloaded_mb, total_mb):
+                if interactive and total_mb:
+                    pct = int(downloaded_mb / total_mb * 100)
+                    _print_status(
+                        f"[dim]  {name}: {pct}% "
+                        f"({downloaded_mb:.0f}/{total_mb:.0f} MB)[/dim]"
+                    )
+
+            result = await download_gguf(
+                name, model_dir,
+                progress_callback=_progress if interactive else None,
+            )
+            if result:
+                provisioned.append(name)
+                if interactive:
+                    _print_status(f"[green]{name} GGUF ready[/green]")
+            else:
+                if interactive:
+                    _print_status(
+                        f"[yellow]Failed to download {name} GGUF[/yellow]"
+                    )
+
+        return provisioned
+
+    def _provision_vllm_models(self, model_names: List[str]) -> List[str]:
+        """Ensure vLLM model name mapping is available.
+
+        vLLM auto-downloads HuggingFace models on startup, so we just
+        need to ensure the HF cache directory exists (for container mode)
+        and log the mapping.
+        """
+        from agentic_concierge.infrastructure.backends.model_downloader import (
+            get_hf_model_id,
+        )
+
+        # Ensure HF cache directory exists (needed for container volume mount)
+        hf_cache = os.path.expanduser("~/.cache/huggingface")
+        os.makedirs(hf_cache, exist_ok=True)
+
+        mapped = []
+        for name in model_names:
+            hf_id = get_hf_model_id(name)
+            if hf_id:
+                logger.info("vLLM model mapping: %s -> %s", name, hf_id)
+                mapped.append(name)
+
+        return mapped
+
+
+def _print_status(msg: str) -> None:
+    """Print a status line using Rich if available, otherwise plain print."""
+    try:
+        from rich import print as rprint
+        rprint(msg)
+    except ImportError:
+        print(msg)

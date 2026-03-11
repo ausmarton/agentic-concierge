@@ -286,11 +286,11 @@ class TestEnsureVllm:
             health = await mgr.ensure_vllm(config, fs)
 
         assert health.status == BackendStatus.HEALTHY
-        # Verify Popen was called with the Ollama model
+        # Verify Popen was called with the HF model ID (mapped from Ollama name)
         cmd = mock_popen.call_args[0][0]
         assert "--model" in cmd
         model_idx = cmd.index("--model") + 1
-        assert cmd[model_idx] == "qwen2.5:7b"
+        assert cmd[model_idx] == "Qwen/Qwen2.5-7B-Instruct"
 
     @pytest.mark.asyncio
     async def test_uses_explicit_model(self):

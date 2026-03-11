@@ -78,7 +78,10 @@ class LlamaCppBackend:
         parallel: int = 1,
         extra_args: Optional[List[str]] = None,
     ) -> None:
-        self._model_dir = model_dir
+        from agentic_concierge.infrastructure.backends.model_downloader import (
+            default_model_dir,
+        )
+        self._model_dir = model_dir if model_dir else default_model_dir()
         self._binary = binary
         self._n_gpu_layers = n_gpu_layers
         self._ctx_size = ctx_size
@@ -116,12 +119,24 @@ class LlamaCppBackend:
     # -------------------------------------------------------------------
 
     async def list_available(self) -> List[str]:
-        """List ``.gguf`` files in the model directory."""
+        """List available models: aliased names + raw .gguf files."""
         if not self._model_dir or not os.path.isdir(self._model_dir):
             return []
-        result = []
+        from agentic_concierge.infrastructure.backends.model_downloader import (
+            _load_aliases,
+            list_aliased_models,
+        )
+        # Aliased names first (e.g. "qwen2.5:7b")
+        result = list_aliased_models(self._model_dir)
+        # Add any raw .gguf files not covered by aliases
+        aliases = _load_aliases(self._model_dir)
+        aliased_files = set(aliases.values())
         for entry in os.scandir(self._model_dir):
-            if entry.is_file() and entry.name.endswith(".gguf"):
+            if (
+                entry.is_file()
+                and entry.name.endswith(".gguf")
+                and entry.name not in aliased_files
+            ):
                 result.append(entry.name)
         return sorted(result)
 
@@ -293,9 +308,22 @@ class LlamaCppBackend:
     # Model pulling (not supported)
     # -------------------------------------------------------------------
 
-    async def pull_model(self, model_id: str, *, timeout_s: int = 600) -> bool:
-        """Not supported — models must be pre-downloaded as ``.gguf`` files."""
-        return False
+    async def pull_model(self, model_id: str, *, timeout_s: int = 1800) -> bool:
+        """Download a GGUF model file from HuggingFace.
+
+        Uses model_sources.yaml to map the Ollama-style model name
+        to a GGUF download URL. Returns True on success.
+        """
+        from agentic_concierge.infrastructure.backends.model_downloader import (
+            download_gguf,
+        )
+
+        if not self._model_dir:
+            logger.warning("Cannot pull model: no model_dir configured")
+            return False
+
+        result = await download_gguf(model_id, self._model_dir, timeout_s=timeout_s)
+        return result is not None
 
     # -------------------------------------------------------------------
     # Internal helpers
@@ -305,16 +333,27 @@ class LlamaCppBackend:
         """Resolve a model ID to a file path.
 
         If ``model_id`` is an absolute path or already exists, use it
-        directly.  Otherwise, look in ``_model_dir``.
+        directly.  Otherwise, look in ``_model_dir``.  Also checks the
+        alias index for Ollama-style model names (e.g. "qwen2.5:7b").
         """
         if os.path.isabs(model_id) and os.path.isfile(model_id):
             return model_id
         if os.path.isfile(model_id):
             return os.path.abspath(model_id)
         if self._model_dir:
+            # Check direct file match
             path = os.path.join(self._model_dir, model_id)
             if os.path.isfile(path):
                 return path
+            # Check aliases (e.g. "qwen2.5:7b" -> "qwen2.5-7b-instruct-q4_k_m.gguf")
+            from agentic_concierge.infrastructure.backends.model_downloader import (
+                resolve_alias,
+            )
+            gguf_file = resolve_alias(self._model_dir, model_id)
+            if gguf_file:
+                alias_path = os.path.join(self._model_dir, gguf_file)
+                if os.path.isfile(alias_path):
+                    return alias_path
         raise FileNotFoundError(
             f"Model file not found: {model_id!r} "
             f"(model_dir={self._model_dir!r})"
