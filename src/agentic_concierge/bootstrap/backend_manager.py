@@ -94,6 +94,8 @@ class BackendManager:
         self.vllm_base_url = vllm_base_url
         self.llama_cpp_base_url = llama_cpp_base_url
         self._health: Dict[str, BackendHealth] = {}
+        self._vllm_pull_in_progress: bool = False
+        self._vllm_pull_image: str = ""
 
     async def probe_all(self, feature_set: "FeatureSet") -> Dict[str, BackendHealth]:
         """Probe all enabled backends concurrently.
@@ -320,6 +322,12 @@ class BackendManager:
         has_container = _has_vllm_image()
 
         if not has_native and not has_container:
+            if self._vllm_pull_in_progress:
+                return BackendHealth(
+                    name="vllm",
+                    status=BackendStatus.HEALTHY,
+                    hint=f"Pulling {self._vllm_pull_image} in background; re-run 'concierge doctor' to check.",
+                )
             return BackendHealth(
                 name="vllm",
                 status=BackendStatus.NOT_INSTALLED,
@@ -519,7 +527,10 @@ class BackendManager:
     async def _setup_vllm_container(self, container_cmd: str) -> Optional[str]:
         """Pull the vLLM container image. Returns error message or None.
 
-        Selects ROCm image for AMD GPUs, CUDA image for NVIDIA.
+        Selects ROCm image for AMD GPUs, CUDA image for NVIDIA.  Waits up
+        to 90 seconds for cached/small images; if still pulling, lets the
+        process continue in the background and returns success so bootstrap
+        is not blocked by multi-GB downloads.
         """
         from agentic_concierge.config.platform import detect_gpu
 
@@ -528,20 +539,41 @@ class BackendManager:
         logger.info("Pulling vLLM container image %s via %s…", image, container_cmd)
 
         try:
-            result = await asyncio.to_thread(
-                subprocess.run,
+            proc = subprocess.Popen(
                 [container_cmd, "pull", image],
-                capture_output=True, text=True, timeout=600,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
             )
-            if result.returncode == 0:
+
+            def _wait_for_pull() -> tuple:
+                try:
+                    _, stderr = proc.communicate(timeout=90)
+                    return proc.returncode, (stderr or b"").decode(errors="replace")
+                except subprocess.TimeoutExpired:
+                    return None, None  # still pulling
+
+            returncode, stderr = await asyncio.to_thread(_wait_for_pull)
+
+            if returncode is None:
+                # Pull still in progress — let it continue in background
+                self._vllm_pull_in_progress = True
+                self._vllm_pull_image = image
+                logger.info(
+                    "vLLM image pull continues in background (PID %d). "
+                    "Re-run 'concierge doctor' to check status.",
+                    proc.pid,
+                )
+                return None  # Not an error — just slow
+
+            if returncode == 0:
                 logger.info("vLLM container image pulled successfully.")
                 return None
-            else:
-                err = result.stderr[-300:] if result.stderr else "unknown error"
-                logger.warning("Failed to pull vLLM image: %s", err)
-                return f"Failed to pull {image}: {err[:200]}"
+
+            err = (stderr or "")[-300:]
+            logger.warning("Failed to pull vLLM image: %s", err)
+            return f"Failed to pull {image}: {err[:200]}"
         except Exception as e:
-            logger.warning("Failed to pull vLLM image: %s", e)
+            logger.warning("Failed to start vLLM image pull: %s", e)
             return str(e)
 
     async def _start_vllm_container_server(
