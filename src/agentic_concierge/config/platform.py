@@ -87,9 +87,11 @@ def _amd_arch_from_device_id(device_id: str) -> str:
 # GPU detection
 # ---------------------------------------------------------------------------
 
-# Regex for lspci VGA/3D lines: "xx:xx.x VGA compatible controller: Vendor Device (rev xx)"
+# Regex for lspci -nn VGA/3D/Display lines.
+# Format: "xx:xx.x Display controller [0380]: Vendor Device [vid:did] (rev xx)"
+# The class code "[0380]" is present in lspci -nn output and must be handled.
 _LSPCI_VGA_RE = re.compile(
-    r"^[0-9a-f:.]+\s+(?:VGA compatible|3D|Display)\s+controller:\s+(.+)",
+    r"^[0-9a-f:.]+\s+(?:VGA compatible|3D|Display)\s+controller\s*(?:\[[0-9a-f]+\])?:\s+(.+)",
     re.IGNORECASE,
 )
 

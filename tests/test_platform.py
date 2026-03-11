@@ -127,6 +127,11 @@ LSPCI_AMD_STRIX = """\
 06:00.0 VGA compatible controller: Advanced Micro Devices, Inc. [AMD/ATI] Phoenix3 [1002:150e] (rev c8)
 """
 
+# Real output from ZBook Ultra G1a — uses "Display controller [0380]:" format
+LSPCI_AMD_DISPLAY_CONTROLLER = """\
+c3:00.0 Display controller [0380]: Advanced Micro Devices, Inc. [AMD/ATI] Strix Halo [Radeon Graphics / Radeon 8050S Graphics / Radeon 8060S Graphics] [1002:1586] (rev d1)
+"""
+
 LSPCI_AMD_RDNA3 = """\
 03:00.0 VGA compatible controller: Advanced Micro Devices, Inc. [AMD/ATI] Navi 31 [Radeon RX 7900 XT/7900 XTX] [1002:744c] (rev c8)
 """
@@ -159,6 +164,15 @@ class TestDetectGpuLspci:
         assert gpu.vendor == "amd"
         assert gpu.arch == "RDNA3.5"
         assert gpu.pci_id == "1002:150e"
+
+    def test_amd_display_controller_format(self):
+        """lspci -nn on some systems outputs 'Display controller [0380]:' instead of 'VGA compatible controller:'."""
+        with patch("subprocess.run", return_value=self._mock_lspci(LSPCI_AMD_DISPLAY_CONTROLLER)):
+            gpu = _detect_gpu_lspci()
+        assert gpu.vendor == "amd"
+        assert gpu.arch == "RDNA3.5"
+        assert gpu.pci_id == "1002:1586"
+        assert "Strix Halo" in gpu.name
 
     def test_amd_rdna3_detected(self):
         with patch("subprocess.run", return_value=self._mock_lspci(LSPCI_AMD_RDNA3)):
